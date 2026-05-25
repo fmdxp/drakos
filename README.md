@@ -31,3 +31,5 @@ To compile and test drakos locally in QEMU, run the included PowerShell script:
 .\run.ps1
 ```
 *(Note: You will need Rust, Cargo, and QEMU installed on your host machine).*
+
+*(Note: Yes, I'm a lazy bum and I made gemini write the docs and the readme, so "We" is intended as "I" for now...).*
