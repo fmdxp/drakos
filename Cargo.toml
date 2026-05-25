@@ -3,7 +3,6 @@ name = "drakos"
 version = "0.1.0"
 edition = "2024"
 
-
 [profile.dev]
 panic = "abort"
 
@@ -11,3 +10,5 @@ panic = "abort"
 panic = "abort"
 
 [dependencies]
+uefi = { version = "0.31.0", features = ["logger", "panic_handler", "alloc", "global_allocator"] }
+log = "0.4"
