@@ -1,0 +1,16 @@
+# Dirs
+
+/cross
+/limine-binary
+/.vscode
+/build
+/iso_root
+
+
+
+# Files
+
+*.o
+*.iso
+*.elf
+*.EFI
