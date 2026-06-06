@@ -1,6 +1,8 @@
 #include <stdint.h>
 #include <stddef.h>
+
 #include "limine.h"
+#include "module.hpp"
 
 static volatile struct limine_framebuffer_request framebuffer_request =
 {
@@ -10,6 +12,9 @@ static volatile struct limine_framebuffer_request framebuffer_request =
 
 extern "C" [[noreturn]] void _start(void)
 {
+    // Execute all registered modules in order
+    system_init_modules();
+
     if (framebuffer_request.response == NULL || framebuffer_request.response->framebuffer_count < 1)
     {
         while (1) asm volatile ("hlt");

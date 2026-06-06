@@ -26,11 +26,15 @@ CXXFLAGS = 	-std=c++20 -O2 -Wall -Wextra \
 			-fno-exceptions \
 			-fno-rtti \
 			-mno-red-zone \
+			-mcmodel=kernel \
 			-fno-stack-protector \
 			-fno-pic \
 			-nostdlib \
 			-Isrc \
 			-Iinclude \
+			-Iinclude/drivers \
+			-Iinclude/kernel \
+			-Iinclude/memory 
 
 LDFLAGS	=	-T linker.ld -nostdlib
 
