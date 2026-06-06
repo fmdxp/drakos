@@ -14,6 +14,17 @@ inline void* operator new[](size_t, void* p) noexcept {
     return p;
 }
 
+// OPERATOR DELETE (no-op)
+// Modules are statically allocated and never freed. However, the C++ compiler
+// still emits a reference to operator delete when a class has a virtual
+// destructor. We define it here as a no-op to satisfy the linker without
+// pulling in the standard library.
+inline void operator delete(void*, size_t) noexcept {}
+inline void operator delete[](void*, size_t) noexcept {}
+// Also required to silence -Wsized-deallocation warnings
+inline void operator delete(void*) noexcept {}
+inline void operator delete[](void*) noexcept {}
+
 // BASE MODULE INTERFACE
 class KernelModule {
 public:

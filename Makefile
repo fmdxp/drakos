@@ -27,6 +27,7 @@ CXXFLAGS = 	-std=c++20 -O2 -Wall -Wextra \
 			-fno-rtti \
 			-mno-red-zone \
 			-mcmodel=kernel \
+			-mgeneral-regs-only \
 			-fno-stack-protector \
 			-fno-pic \
 			-nostdlib \
@@ -71,4 +72,4 @@ clean:
 
 
 run: $(ISO)
-	qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl
+	qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio

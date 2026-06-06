@@ -7,7 +7,8 @@
 static volatile struct limine_framebuffer_request framebuffer_request =
 {
     .id = LIMINE_FRAMEBUFFER_REQUEST_ID,
-    .revision = 0
+    .revision = 0,
+    .response = nullptr     // Needed to add this to suppress a warning
 };
 
 extern "C" [[noreturn]] void _start(void)
