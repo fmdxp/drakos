@@ -4,7 +4,6 @@ CXX = cross/bin/x86_64-elf-g++
 LD  = cross/bin/x86_64-elf-ld
 
 
-
 ## Dirs ##
 
 LIMINE_DIR 	= ./limine-binary
@@ -17,6 +16,8 @@ BUILD 		= build
 SRCS = $(shell find src -name "*.cpp")
 OBJS = $(patsubst %.cpp, $(BUILD)/%.o, $(notdir $(SRCS)))
 vpath %.cpp $(sort $(dir $(SRCS)))
+
+
 
 ## Flags ##
 
@@ -51,12 +52,14 @@ $(KERNEL): $(OBJS) linker.ld
 	$(LD) $(LDFLAGS) $(OBJS) -o $(KERNEL)
 
 
-$(ISO): $(KERNEL) limine.cfg
-	cp $(LIMINE_DIR)/BOOTX64.EFI iso_root/
-	xorriso -as mkisofs -b BOOTX64.EFI \
-		-no-emul-boot -boot-load-size 4 -boot-info-table \
+$(ISO): $(KERNEL) limine.conf
+	@mkdir -p iso_root/EFI/BOOT
+	cp $(LIMINE_DIR)/BOOTX64.EFI iso_root/EFI/BOOT/
+	cp limine.conf iso_root/
+	cp $(LIMINE_DIR)/limine-uefi-cd.bin iso_root/
+	xorriso -as mkisofs -R -r -J -V "DRAKOS" \
+		--efi-boot limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
 		iso_root -o $(ISO)
-	$(LIMINE_DIR)/limine bios-install $(ISO)
 
 
 clean:
@@ -64,4 +67,4 @@ clean:
 
 
 run: $(ISO)
-	qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M
+	qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl
