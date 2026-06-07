@@ -11,17 +11,27 @@ SECTIONS
 
     .rodata : ALIGN(4K) {
         *(.rodata .rodata.*)
-
         /* --- MODULE INITCALLS --- */
         . = ALIGN(8);
         __initcalls_1_core_start = .;
         KEEP(*(.initcalls.1_core))
         __initcalls_1_core_end = .;
 
+        /* --- MEMORY SUBSYSTEM (ordered: PMM → VMM → Heap) --- */
         . = ALIGN(8);
-        __initcalls_2_mem_start = .;
-        KEEP(*(.initcalls.2_mem))
-        __initcalls_2_mem_end = .;
+        __initcalls_2_mem_a_start = .;
+        KEEP(*(.initcalls.2_mem_a))
+        __initcalls_2_mem_a_end = .;
+
+        . = ALIGN(8);
+        __initcalls_2_mem_b_start = .;
+        KEEP(*(.initcalls.2_mem_b))
+        __initcalls_2_mem_b_end = .;
+
+        . = ALIGN(8);
+        __initcalls_2_mem_c_start = .;
+        KEEP(*(.initcalls.2_mem_c))
+        __initcalls_2_mem_c_end = .;
 
         . = ALIGN(8);
         __initcalls_3_drv_start = .;

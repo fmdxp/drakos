@@ -3,8 +3,12 @@
 // Extern symbols from linker script
 extern "C" initcall_t __initcalls_1_core_start[];
 extern "C" initcall_t __initcalls_1_core_end[];
-extern "C" initcall_t __initcalls_2_mem_start[];
-extern "C" initcall_t __initcalls_2_mem_end[];
+extern "C" initcall_t __initcalls_2_mem_a_start[];  // PMM
+extern "C" initcall_t __initcalls_2_mem_a_end[];
+extern "C" initcall_t __initcalls_2_mem_b_start[];  // VMM
+extern "C" initcall_t __initcalls_2_mem_b_end[];
+extern "C" initcall_t __initcalls_2_mem_c_start[];  // Heap
+extern "C" initcall_t __initcalls_2_mem_c_end[];
 extern "C" initcall_t __initcalls_3_drv_start[];
 extern "C" initcall_t __initcalls_3_drv_end[];
 
@@ -20,6 +24,8 @@ static void execute_initcalls(initcall_t* start, initcall_t* end) {
 
 void system_init_modules() {
     execute_initcalls(__initcalls_1_core_start, __initcalls_1_core_end);
-    execute_initcalls(__initcalls_2_mem_start, __initcalls_2_mem_end);
+    execute_initcalls(__initcalls_2_mem_a_start, __initcalls_2_mem_a_end); // PMM first
+    execute_initcalls(__initcalls_2_mem_b_start, __initcalls_2_mem_b_end); // VMM second
+    execute_initcalls(__initcalls_2_mem_c_start, __initcalls_2_mem_c_end); // Heap third
     execute_initcalls(__initcalls_3_drv_start, __initcalls_3_drv_end);
 }

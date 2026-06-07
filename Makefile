@@ -15,6 +15,7 @@ BUILD 		= build
 
 SRCS = $(shell find src -name "*.cpp")
 OBJS = $(patsubst %.cpp, $(BUILD)/%.o, $(notdir $(SRCS)))
+FONT_OBJ = $(BUILD)/font.o
 vpath %.cpp $(sort $(dir $(SRCS)))
 
 
@@ -52,9 +53,13 @@ $(BUILD)/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 
-$(KERNEL): $(OBJS) linker.ld
+$(BUILD)/font.o: src/fonts/Lat2-Terminus16.psf
+	@mkdir -p $(BUILD)
+	objcopy -O elf64-x86-64 -B i386 -I binary $< $@
+
+$(KERNEL): $(OBJS) $(FONT_OBJ) linker.ld
 	@mkdir -p iso_root
-	$(LD) $(LDFLAGS) $(OBJS) -o $(KERNEL)
+	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJ) -o $(KERNEL)
 
 
 $(ISO): $(KERNEL) limine.conf
