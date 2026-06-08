@@ -39,6 +39,9 @@ bool VGA::start() {
         }
     }
 
+    // Draw the initial cursor
+    draw_cursor();
+
     return true;
 }
 
@@ -74,10 +77,30 @@ void VGA::put_pixel(uint32_t x, uint32_t y, uint32_t color) {
 void VGA::write_char(char c) {
     if (!m_font) return;
 
+    // We are about to change cursor position, clear the old one
+    clear_cursor();
+
     // Handle newline
     if (c == '\n') {
         m_cursor_x = 0;
         m_cursor_y += m_font->get_height();
+        if (m_cursor_y + m_font->get_height() > m_height) scroll();
+        draw_cursor();
+        return;
+    }
+
+    // Handle backspace
+    if (c == '\b') {
+        if (m_cursor_x >= m_font->get_width()) {
+            m_cursor_x -= m_font->get_width();
+            // Erase character on screen
+            for (uint32_t cy = 0; cy < m_font->get_height(); cy++) {
+                for (uint32_t cx = 0; cx < m_font->get_width(); cx++) {
+                    put_pixel(m_cursor_x + cx, m_cursor_y + cy, m_bg_color);
+                }
+            }
+        }
+        draw_cursor();
         return;
     }
 
@@ -90,6 +113,7 @@ void VGA::write_char(char c) {
     if (m_cursor_x + glyph_width >= m_width) {
         m_cursor_x = 0;
         m_cursor_y += glyph_height;
+        if (m_cursor_y + glyph_height > m_height) scroll();
     }
 
     // TODO: Handle scrolling if m_cursor_y + glyph_height >= m_height
@@ -110,11 +134,75 @@ void VGA::write_char(char c) {
 
     // Advance cursor
     m_cursor_x += glyph_width;
+    
+    // Check if wrapping is needed immediately after advancing
+    if (m_cursor_x + glyph_width >= m_width) {
+        m_cursor_x = 0;
+        m_cursor_y += glyph_height;
+        if (m_cursor_y + glyph_height > m_height) scroll();
+    }
+
+    draw_cursor();
 }
 
 void VGA::write(const char* str) {
     while (*str) {
         write_char(*str++);
+    }
+}
+
+void VGA::scroll() {
+    if (!m_font) return;
+    
+    uint32_t font_h = m_font->get_height();
+    
+    // Calculate the number of bytes to move
+    // We move everything from the second row of text up to the top
+    uint32_t bytes_to_move = m_pitch * (m_height - font_h);
+    
+    // Copy the memory up
+    uint8_t* dest = reinterpret_cast<uint8_t*>(m_framebuffer);
+    uint8_t* src = dest + (m_pitch * font_h);
+    for (uint32_t i = 0; i < bytes_to_move; i++) {
+        dest[i] = src[i];
+    }
+    
+    // Clear the last line
+    for (uint32_t y = m_height - font_h; y < m_height; y++) {
+        for (uint32_t x = 0; x < m_width; x++) {
+            put_pixel(x, y, m_bg_color);
+        }
+    }
+    
+    // Update cursor position
+    m_cursor_y -= font_h;
+}
+
+void VGA::draw_cursor() {
+    if (!m_font) return;
+    
+    // Draw a solid block using foreground color
+    uint32_t w = m_font->get_width();
+    uint32_t h = m_font->get_height();
+    
+    for (uint32_t cy = 0; cy < h; cy++) {
+        for (uint32_t cx = 0; cx < w; cx++) {
+            put_pixel(m_cursor_x + cx, m_cursor_y + cy, m_fg_color);
+        }
+    }
+}
+
+void VGA::clear_cursor() {
+    if (!m_font) return;
+    
+    // Clear the block using background color
+    uint32_t w = m_font->get_width();
+    uint32_t h = m_font->get_height();
+    
+    for (uint32_t cy = 0; cy < h; cy++) {
+        for (uint32_t cx = 0; cx < w; cx++) {
+            put_pixel(m_cursor_x + cx, m_cursor_y + cy, m_bg_color);
+        }
     }
 }
 

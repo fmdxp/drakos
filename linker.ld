@@ -37,6 +37,12 @@ SECTIONS
         __initcalls_3_drv_start = .;
         KEEP(*(.initcalls.3_drv))
         __initcalls_3_drv_end = .;
+
+        /* --- DEVICE DRIVERS (Keyboard, Mouse, etc) --- */
+        . = ALIGN(8);
+        __initcalls_4_dev_start = .;
+        KEEP(*(.initcalls.4_dev))
+        __initcalls_4_dev_end = .;
     }
 
     .data : ALIGN(4K) {

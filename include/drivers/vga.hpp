@@ -13,6 +13,10 @@ public:
     void write_char(char c);        // Single char printing
     void write(const char* str);    // String printing
 
+    void scroll();
+    void draw_cursor();
+    void clear_cursor();
+
     bool selectBitmapFont(const BitmapFont* font);
 
 private:

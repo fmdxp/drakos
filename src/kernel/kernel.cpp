@@ -29,6 +29,14 @@ volatile struct limine_hhdm_request g_hhdm_request =
     .response = nullptr
 };
 
+// ACPI RSDP: gives us the pointer to the ACPI tables
+volatile struct limine_rsdp_request g_rsdp_request =
+{
+    .id = LIMINE_RSDP_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr
+};
+
 extern "C" [[noreturn]] void _start(void)
 {
     // Execute all registered modules in order
