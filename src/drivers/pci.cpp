@@ -25,6 +25,18 @@ uint32_t PCI::read(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset) {
     return inl(PCI_CONFIG_DATA);
 }
 
+void PCI::write(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint32_t value) {
+    uint32_t address = 
+        (1 << 31) | 
+        (bus << 16) | 
+        ((device & 0x1F) << 11) | 
+        ((func & 0x07) << 8) | 
+        (offset & 0xFC);
+        
+    outl(PCI_CONFIG_ADDRESS, address);
+    outl(PCI_CONFIG_DATA, value);
+}
+
 void PCI::print_device(const PCIDevice& dev) {
     if (!g_vga) return;
     
@@ -55,6 +67,34 @@ void PCI::check_function(uint8_t bus, uint8_t device, uint8_t func) {
     PCIDevice pci_dev = {bus, device, func, vendor_id, device_id, class_code, subclass, prog_if};
     
     print_device(pci_dev);
+
+    // Is this an xHCI Controller?
+    if (class_code == 0x0C && subclass == 0x03 && prog_if == 0x30) {
+        // Read BAR0 (Offset 0x10) and BAR1 (Offset 0x14) for 64-bit address
+        uint32_t bar0 = read(bus, device, func, 0x10);
+        uint32_t bar1 = read(bus, device, func, 0x14);
+        
+        uintptr_t mmio_base = 0;
+        
+        // Check if it's a 64-bit BAR
+        if ((bar0 & 0x06) == 0x04) {
+            mmio_base = (bar0 & 0xFFFFFFF0) | ((uintptr_t)bar1 << 32);
+        } else {
+            mmio_base = (bar0 & 0xFFFFFFF0);
+        }
+        
+        m_xhci_bar = mmio_base;
+        m_xhci_device = pci_dev;
+        
+        // Enable Bus Mastering (Bit 2) and Memory Space (Bit 1) in Command Register (Offset 0x04)
+        uint32_t cmd = read(bus, device, func, 0x04);
+        cmd |= (1 << 2) | (1 << 1);
+        write(bus, device, func, 0x04, cmd);
+        
+        if (g_vga) {
+            g_vga->write("  -> xHCI Controller Found and Enabled!\n");
+        }
+    }
 }
 
 void PCI::check_device(uint8_t bus, uint8_t device) {

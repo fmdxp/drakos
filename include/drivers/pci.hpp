@@ -37,8 +37,17 @@ public:
 
     // Read a 32-bit register from PCI Configuration Space
     uint32_t read(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset);
+    
+    // Write a 32-bit register to PCI Configuration Space
+    void write(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint32_t value);
+
+    // Getters for xHCI
+    uintptr_t get_xhci_bar() const { return m_xhci_bar; }
+    PCIDevice get_xhci_device() const { return m_xhci_device; }
 
 private:
+    uintptr_t m_xhci_bar = 0;
+    PCIDevice m_xhci_device = {0};
     void check_bus(uint8_t bus);
     void check_device(uint8_t bus, uint8_t device);
     void check_function(uint8_t bus, uint8_t device, uint8_t func);

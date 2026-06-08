@@ -96,4 +96,4 @@ clean:
 
 
 run: $(ISO)
-	qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio
+	qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio -device qemu-xhci

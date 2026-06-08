@@ -24,6 +24,7 @@
 #include "module.hpp"
 #include "limine_requests.hpp"
 #include "vga.hpp"
+#include "panic.hpp"
 
 volatile struct limine_framebuffer_request g_framebuffer_request =
 {
@@ -67,6 +68,7 @@ extern "C" [[noreturn]] void _start(void)
         while (1) asm volatile ("hlt");
     }
 
+    if (!g_vga) panic("VGA did not init");
 
     g_vga->write("Welcome to drakos!");
     

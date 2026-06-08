@@ -62,6 +62,12 @@ SECTIONS
         __initcalls_4_dev_start = .;
         KEEP(*(.initcalls.4_dev))
         __initcalls_4_dev_end = .;
+
+        /* --- USB SUBSYSTEM (xHCI) --- */
+        . = ALIGN(8);
+        __initcalls_5_usb_start = .;
+        KEEP(*(.initcalls.5_usb))
+        __initcalls_5_usb_end = .;
     }
 
     .data : ALIGN(4K) {
