@@ -21,10 +21,21 @@
 // USBCMD bits
 #define USBCMD_RS           (1 << 0) // Run/Stop
 #define USBCMD_HCRST        (1 << 1) // Host Controller Reset
+#define USBCMD_INTE         (1 << 2) // Interrupter Enable
 
 // USBSTS bits
 #define USBSTS_HCH          (1 << 0) // HC Halted
+#define USBSTS_EINT         (1 << 3) // Event Interrupt
 #define USBSTS_CNR          (1 << 11) // Controller Not Ready
+
+// Runtime Registers Offset (from capabilities)
+#define XHCI_RTSOFF         0x18
+
+struct ERST_Entry {
+    uint64_t ring_segment_base_address;
+    uint32_t ring_segment_size; // Number of TRBs
+    uint32_t rsvd;
+} __attribute__((packed));
 
 uint32_t XHCI::read32(uint32_t offset) {
     volatile uint32_t* ptr = reinterpret_cast<volatile uint32_t*>(m_mmio_base + offset);
@@ -112,11 +123,45 @@ bool XHCI::initialize_data_structures() {
     return true;
 }
 
+bool XHCI::configure_interrupter() {
+    uint32_t rts_off = read32(XHCI_RTSOFF) & ~0x1F;
+    uint32_t ir0_base = rts_off + 0x0020; // Interrupter 0 registers
+
+    // Allocate Event Ring Segment
+    m_event_ring_phys = pmm_alloc(1);
+    if (!m_event_ring_phys) return false;
+    
+    // Zero out Event Ring
+    uint64_t* event_ring_virt = reinterpret_cast<uint64_t*>(m_event_ring_phys + pmm_hhdm_offset());
+    for (int i = 0; i < 512; i++) event_ring_virt[i] = 0;
+
+    // Allocate ERST (Event Ring Segment Table)
+    m_erst_phys = pmm_alloc(1);
+    if (!m_erst_phys) return false;
+
+    ERST_Entry* erst_virt = reinterpret_cast<ERST_Entry*>(m_erst_phys + pmm_hhdm_offset());
+    erst_virt[0].ring_segment_base_address = m_event_ring_phys;
+    erst_virt[0].ring_segment_size = 256; // 256 TRBs (16 bytes each) fits in one 4096 page
+    erst_virt[0].rsvd = 0;
+
+    // Configure Interrupter 0
+    write32(ir0_base + 0x08, 1); // ERSTSZ: 1 segment
+    write64(ir0_base + 0x18, m_event_ring_phys | 0x08); // ERDP (Dequeue pointer + EHB bit)
+    write64(ir0_base + 0x10, m_erst_phys); // ERSTBA
+
+    // Enable Interrupter 0 (IMAN - Interrupt Management)
+    uint32_t iman = read32(ir0_base + 0x00);
+    iman |= (1 << 1); // IE (Interrupt Enable)
+    write32(ir0_base + 0x00, iman);
+
+    return true;
+}
+
 bool XHCI::start_controller() {
     uint32_t op_base = m_cap_length;
     
     uint32_t cmd = read32(op_base + XHCI_USBCMD);
-    cmd |= USBCMD_RS;
+    cmd |= USBCMD_RS | USBCMD_INTE; // Start and enable global interrupts
     write32(op_base + XHCI_USBCMD, cmd);
     
     // Wait until HC Halted is cleared
@@ -152,6 +197,15 @@ bool XHCI::start() {
     
     if (!reset_controller()) return false;
     if (!initialize_data_structures()) return false;
+    if (!configure_interrupter()) return false;
+
+    // Configure MSI (Route to Vector 40)
+    PCIDevice pci_dev = g_pci->get_xhci_device();
+    if (!g_pci->configure_msi(pci_dev.bus, pci_dev.device, pci_dev.function, 40)) {
+        if (g_vga) g_vga->write("xHCI: Failed to configure MSI!\n");
+        return false;
+    }
+
     if (!start_controller()) return false;
 
     return true;
@@ -162,6 +216,40 @@ void XHCI::stop() {
 
 const char* XHCI::get_name() const {
     return "xHCI Controller";
+}
+
+void XHCI::handle_interrupt() {
+    uint32_t op_base = m_cap_length;
+    
+    // Clear Event Interrupt Status
+    uint32_t sts = read32(op_base + XHCI_USBSTS);
+    if (sts & USBSTS_EINT) {
+        write32(op_base + XHCI_USBSTS, USBSTS_EINT); // Write 1 to clear
+    }
+    
+    uint32_t rts_off = read32(XHCI_RTSOFF) & ~0x1F;
+    uint32_t ir0_base = rts_off + 0x0020;
+    
+    // Clear Interrupt Pending in IMAN
+    uint32_t iman = read32(ir0_base + 0x00);
+    if (iman & 1) {
+        write32(ir0_base + 0x00, iman | 1); // Write 1 to clear IP
+    }
+    
+    if (g_vga) {
+        g_vga->write("xHCI: INTERRUPT RECEIVED!\n");
+    }
+
+    // Acknowledge interrupt to LAPIC
+    extern void lapic_eoi();
+    lapic_eoi();
+}
+
+extern "C" __attribute__((interrupt)) void xhci_isr(InterruptFrame* frame) {
+    (void)frame;
+    if (g_xhci) {
+        g_xhci->handle_interrupt();
+    }
 }
 
 // Register as level 5 (after basic dev/pci)

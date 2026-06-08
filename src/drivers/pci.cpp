@@ -1,5 +1,7 @@
 #include "pci.hpp"
 #include "vga.hpp"
+#include "vmm.hpp"
+#include "pmm.hpp"
 
 // Convert an integer to a hex string manually, since we don't have printf
 static void print_hex(uint32_t val, int digits) {
@@ -35,6 +37,106 @@ void PCI::write(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint3
         
     outl(PCI_CONFIG_ADDRESS, address);
     outl(PCI_CONFIG_DATA, value);
+}
+
+bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vector) {
+    // Check if capabilities list is supported (Status Register Bit 4)
+    uint32_t status_cmd = read(bus, device, func, 0x04);
+    if ((status_cmd & (1 << 20)) == 0) return false; // 0x04 reads Command (low 16) and Status (high 16). Bit 4 of Status is Bit 20.
+
+    uint8_t cap_ptr = read(bus, device, func, 0x34) & 0xFF;
+    
+    // Prevent infinite loops in corrupted config spaces
+    int max_caps = 48;
+    
+    while (cap_ptr != 0 && max_caps-- > 0) {
+        // cap_ptr must be dword aligned
+        cap_ptr &= ~3;
+        
+        uint32_t cap_header = read(bus, device, func, cap_ptr);
+        uint8_t cap_id = cap_header & 0xFF;
+        
+        // Debug print to see what capabilities QEMU xHCI exposes
+        if (g_vga) {
+            g_vga->write("    PCI Cap found: 0x");
+            char buf[3];
+            buf[0] = (cap_id >> 4) < 10 ? '0' + (cap_id >> 4) : 'A' + (cap_id >> 4) - 10;
+            buf[1] = (cap_id & 0x0F) < 10 ? '0' + (cap_id & 0x0F) : 'A' + (cap_id & 0x0F) - 10;
+            buf[2] = '\0';
+            g_vga->write(buf);
+            g_vga->write("\n");
+        }
+        
+        if (cap_id == 0x05) { // MSI Capability
+            uint16_t msg_ctrl = (cap_header >> 16) & 0xFFFF;
+            bool is_64bit = (msg_ctrl & (1 << 7)) != 0;
+            
+            // MSI Address: 0xFEE00000 | (APIC_ID << 12). 
+            // Assuming APIC ID 0 (BSP) for now.
+            uint32_t msi_addr = 0xFEE00000;
+            write(bus, device, func, cap_ptr + 4, msi_addr);
+            
+            if (is_64bit) {
+                write(bus, device, func, cap_ptr + 8, 0); // Upper 32 bits of address
+                write(bus, device, func, cap_ptr + 12, vector); // Data is the vector
+            } else {
+                write(bus, device, func, cap_ptr + 8, vector); // Data is the vector
+            }
+            
+            // Enable MSI (Bit 0 of Message Control)
+            msg_ctrl |= 1;
+            uint32_t new_header = (cap_header & 0x0000FFFF) | ((uint32_t)msg_ctrl << 16);
+            write(bus, device, func, cap_ptr, new_header);
+            
+            if (g_vga) g_vga->write("    -> MSI Configured!\n");
+            return true;
+        } else if (cap_id == 0x11) { // MSI-X Capability
+            uint16_t msg_ctrl = (cap_header >> 16) & 0xFFFF;
+            
+            uint32_t table_info = read(bus, device, func, cap_ptr + 4);
+            uint8_t bir = table_info & 0x07;
+            uint32_t table_offset = table_info & ~0x07;
+            
+            // Get BAR address
+            uint32_t bar_offset = 0x10 + (bir * 4);
+            uint32_t bar_low = read(bus, device, func, bar_offset);
+            uintptr_t table_phys = 0;
+            
+            if ((bar_low & 0x06) == 0x04) { // 64-bit BAR
+                uint32_t bar_high = read(bus, device, func, bar_offset + 4);
+                table_phys = (bar_low & 0xFFFFFFF0) | ((uintptr_t)bar_high << 32);
+            } else {
+                table_phys = (bar_low & 0xFFFFFFF0);
+            }
+            
+            table_phys += table_offset;
+            
+            // Ensure the MSI-X table is mapped in the HHDM
+            uintptr_t table_virt = table_phys + pmm_hhdm_offset();
+            vmm_map(table_virt & ~0xFFFULL, table_phys & ~0xFFFULL, VMM_MMIO);
+            
+            // Write Entry 0
+            volatile uint32_t* msix_table = reinterpret_cast<volatile uint32_t*>(table_virt);
+            msix_table[0] = 0xFEE00000; // Msg Addr Low (APIC)
+            msix_table[1] = 0;          // Msg Addr High
+            msix_table[2] = vector;     // Msg Data (Vector)
+            msix_table[3] = 0;          // Vector Control (0 = Unmasked)
+            
+            // Enable MSI-X (Bit 15) and clear Function Mask (Bit 14)
+            msg_ctrl |= (1 << 15);
+            msg_ctrl &= ~(1 << 14);
+            
+            uint32_t new_header = (cap_header & 0x0000FFFF) | ((uint32_t)msg_ctrl << 16);
+            write(bus, device, func, cap_ptr, new_header);
+            
+            if (g_vga) g_vga->write("    -> MSI-X Configured!\n");
+            return true;
+        }
+        
+        cap_ptr = (cap_header >> 8) & 0xFF;
+    }
+    
+    return false;
 }
 
 void PCI::print_device(const PCIDevice& dev) {

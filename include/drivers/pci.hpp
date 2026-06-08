@@ -41,6 +41,9 @@ public:
     // Write a 32-bit register to PCI Configuration Space
     void write(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint32_t value);
 
+    // Configure MSI for a device to route interrupts to the given IDT vector
+    bool configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vector);
+
     // Getters for xHCI
     uintptr_t get_xhci_bar() const { return m_xhci_bar; }
     PCIDevice get_xhci_device() const { return m_xhci_device; }

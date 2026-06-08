@@ -25,6 +25,7 @@
 #include "limine_requests.hpp"
 #include "vga.hpp"
 #include "panic.hpp"
+#include "serial.hpp"
 
 volatile struct limine_framebuffer_request g_framebuffer_request =
 {

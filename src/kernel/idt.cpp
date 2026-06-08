@@ -24,6 +24,7 @@
 // Actually, it's better to expose a way to register interrupt handlers dynamically.
 // For now, we will declare the keyboard_isr here.
 extern "C" __attribute__((interrupt)) void keyboard_isr(InterruptFrame* frame);
+extern "C" __attribute__((interrupt)) void xhci_isr(InterruptFrame* frame);
 
 // Generic ISR for unhandled interrupts
 __attribute__((interrupt)) void default_isr(InterruptFrame* frame) {
@@ -99,11 +100,14 @@ bool IDT::start() {
     // 2. Set the Keyboard ISR at Vector 33
     set_entry(33, reinterpret_cast<uint64_t>(keyboard_isr), 0x8E);
 
-    // 3. Setup the IDT pointer
+    // 3. Set the xHCI ISR at Vector 40
+    set_entry(40, reinterpret_cast<uint64_t>(xhci_isr), 0x8E);
+
+    // 4. Setup the IDT pointer
     pointer.limit = sizeof(entries) - 1;
     pointer.base = reinterpret_cast<uint64_t>(&entries[0]);
 
-    // 4. Load the IDT
+    // 5. Load the IDT
     asm volatile("lidt %0" : : "m"(pointer));
 
     // 5. Enable hardware interrupts!
