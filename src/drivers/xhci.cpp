@@ -247,7 +247,19 @@ void XHCI::reset_port(uint32_t port_num) {
     portsc |= PORTSC_PRC; // Write 1 to clear
     write32(portsc_offset, portsc);
     
-    if (g_vga) g_vga->write("xHCI: Port Reset Complete. Issuing Enable Slot...\n");
+    // Read Speed (Bits 10:13)
+    portsc = read32(portsc_offset);
+    m_current_port_speed = (portsc >> 10) & 0xF;
+    m_current_port_num = port_num;
+    
+    if (g_vga) {
+        g_vga->write("xHCI: Port Reset Complete. Speed: ");
+        char buf[2];
+        buf[0] = m_current_port_speed + '0';
+        buf[1] = '\0';
+        g_vga->write(buf);
+        g_vga->write(" Issuing Enable Slot...\n");
+    }
     
     // Send Enable Slot Command
     TRB cmd = {0};
@@ -332,6 +344,58 @@ const char* XHCI::get_name() const {
     return "xHCI Controller";
 }
 
+void XHCI::configure_slot(uint32_t slot_id, uint32_t port_speed, uint32_t port_num) {
+    if (g_vga) g_vga->write("xHCI: Configuring Contexts and Sending Address Device...\n");
+
+    // Get Context Size from HCCPARAMS1 (Bit 2)
+    uint32_t hccparams1 = read32(0x10);
+    bool csz = (hccparams1 & (1 << 2)) != 0;
+    uint32_t ctx_size = csz ? 64 : 32;
+    uint32_t slot_ctx_idx = ctx_size / 4;
+    uint32_t ep0_ctx_idx = (ctx_size * 2) / 4;
+
+    // 1. Allocate Device Context
+    uintptr_t dev_ctx_phys = pmm_alloc(1);
+    uint64_t* dcbaa = reinterpret_cast<uint64_t*>(m_dcbaa_phys + pmm_hhdm_offset());
+    dcbaa[slot_id] = dev_ctx_phys;
+
+    // 2. Allocate Input Context
+    uintptr_t in_ctx_phys = pmm_alloc(1);
+    uint32_t* in_ctx = reinterpret_cast<uint32_t*>(in_ctx_phys + pmm_hhdm_offset());
+    for(int i = 0; i < 1024; i++) in_ctx[i] = 0; // zero out 4KB page
+    
+    // Input Control Context (Add Slot and EP0)
+    in_ctx[1] = 3; // Add Context Flags: Bit 0 = Slot, Bit 1 = EP0
+    
+    // Slot Context 
+    // Dword 0: Context Entries = 1 (Bits 27:31), Speed = port_speed (Bits 20:23)
+    in_ctx[slot_ctx_idx + 0] = (1 << 27) | (port_speed << 20);
+    
+    // Dword 1: Root Hub Port Number = port_num (Bits 16:23)
+    in_ctx[slot_ctx_idx + 1] = (port_num << 16);
+    
+    // EP0 Context 
+    // Max Packet Size: 512 for SuperSpeed (4), 64 for HighSpeed (3), 8 for FullSpeed (1)
+    uint32_t max_packet_size = (port_speed == 4) ? 512 : ((port_speed == 3) ? 64 : 8);
+    
+    // Dword 1: CErr = 3 (Bits 1:2), EP Type = 4 (Bits 3:5), Max Packet Size (Bits 16:31)
+    in_ctx[ep0_ctx_idx + 1] = (3 << 1) | (4 << 3) | (max_packet_size << 16);
+    
+    // Allocate EP0 Transfer Ring
+    uintptr_t ep0_ring_phys = pmm_alloc(1);
+    in_ctx[ep0_ctx_idx + 2] = ep0_ring_phys & 0xFFFFFFFF; // TR Dequeue Pointer Low
+    in_ctx[ep0_ctx_idx + 3] = (ep0_ring_phys >> 32) & 0xFFFFFFFF; // TR Dequeue Pointer High
+    in_ctx[ep0_ctx_idx + 2] |= 1; // DCS bit (Dequeue Cycle State)
+
+    // 3. Send Address Device Command (TRB Type 11)
+    TRB cmd = {0};
+    cmd.parameter1 = in_ctx_phys & 0xFFFFFFFF;
+    cmd.parameter2 = (in_ctx_phys >> 32) & 0xFFFFFFFF;
+    cmd.control = (11 << 10) | (slot_id << 24);
+    
+    send_command(cmd);
+}
+
 void XHCI::handle_interrupt() {
     uint32_t op_base = m_cap_length;
     
@@ -360,14 +424,45 @@ void XHCI::handle_interrupt() {
         
         if (trb_type == TRB_EVENT_CMD_COMPLETION) {
             uint32_t slot_id = (current_event.control >> 24) & 0xFF;
+            uint32_t cmd_completion_code = (current_event.status >> 24) & 0xFF;
+            
+            // To be precise we should read the physical pointer in current_event.parameter1 to know exactly which command completed.
+            // For now, if we get a Slot ID, we assume it's the Enable Slot or Address Device completion.
             if (g_vga) {
-                g_vga->write("xHCI: Command Completed! Device assigned Slot ID: ");
-                char buf[2];
+                g_vga->write("xHCI: Command Completed. Code: ");
+                char buf[3];
+                buf[0] = (cmd_completion_code / 10) + '0';
+                buf[1] = (cmd_completion_code % 10) + '0';
+                buf[2] = '\0';
+                g_vga->write(buf);
+                g_vga->write(" Slot ID: ");
                 buf[0] = slot_id + '0';
                 buf[1] = '\0';
                 g_vga->write(buf);
                 g_vga->write("\n");
             }
+            
+            // Very simple state machine for the prototype
+            // If we just got a Slot ID (Enable Slot success), configure it
+            if (cmd_completion_code == 1 && slot_id > 0) {
+                // Determine which command just completed by assuming state.
+                // In a real driver, we'd check the command TRB parameter.
+                // For now, if Address Device succeeded, tell the user!
+                // We assume if m_current_port_speed is set, and it's the first Enable Slot, we call configure_slot.
+                // Wait, if configure_slot completes, it ALSO generates a Command Completion with code 1.
+                // To prevent infinite loop, we only configure slot if we haven't done it yet.
+                static bool addressed = false;
+                if (!addressed) {
+                    configure_slot(slot_id, m_current_port_speed, m_current_port_num);
+                    addressed = true;
+                } else {
+                    if (g_vga) g_vga->write("xHCI: Device Addressed Successfully! USB setup complete!\n");
+                    g_usb_manager->register_device(slot_id, this);
+                }
+            } else if (cmd_completion_code != 1) {
+                if (g_vga) g_vga->write("xHCI: TRB ERROR! Check context structures.\n");
+            }
+            
         } else if (trb_type == TRB_EVENT_PORT_STATUS) {
             if (g_vga) g_vga->write("xHCI: Port Status Change Event Received.\n");
         }

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "module.hpp"
+#include "usb/usb.hpp"
 
 // Forward declaration
 class PCI;
@@ -44,6 +45,9 @@ private:
     uint32_t  m_event_ring_index = 0;
     bool      m_event_ring_ccs = true;
     
+    uint32_t m_current_port_num = 0;
+    uint32_t m_current_port_speed = 0;
+    
     // Helper to read MMIO
     uint32_t read32(uint32_t offset);
     void write32(uint32_t offset, uint32_t value);
@@ -59,6 +63,7 @@ private:
     void enumerate_ports();
     void reset_port(uint32_t port_num);
     void send_command(const TRB& trb);
+    void configure_slot(uint32_t slot_id, uint32_t port_speed, uint32_t port_num);
 
 public:
     void handle_interrupt();
