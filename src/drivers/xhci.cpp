@@ -1,6 +1,7 @@
 #include "xhci.hpp"
 #include "pci.hpp"
 #include "pmm.hpp"
+#include "vmm.hpp"
 #include "vga.hpp"
 
 // Capability Registers Offsets
@@ -134,6 +135,13 @@ bool XHCI::start() {
     if (phys_bar == 0) return false; // No xHCI found
     
     m_mmio_base = phys_bar + pmm_hhdm_offset();
+
+    // The bootloader HHDM only maps RAM, not MMIO!
+    // We MUST map the xHCI MMIO space explicitly to prevent a Page Fault.
+    // We'll map 4 pages (16KB) to be safe for capability + operational + runtime registers.
+    for (int i = 0; i < 4; i++) {
+        vmm_map(m_mmio_base + (i * 4096), phys_bar + (i * 4096), VMM_MMIO);
+    }
     
     // Parse capabilities
     m_cap_length = read32(XHCI_CAPLENGTH) & 0xFF;

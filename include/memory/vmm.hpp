@@ -30,11 +30,13 @@
 #define VMM_PRESENT  (1ULL << 0)   // Page is mapped and accessible
 #define VMM_WRITE    (1ULL << 1)   // Page is writable
 #define VMM_USER     (1ULL << 2)   // Accessible from user space (Ring 3)
+#define VMM_CACHE_DISABLE ((1ULL << 3) | (1ULL << 4)) // Page-level Write-Through and Cache Disable
 #define VMM_NX       (1ULL << 63)  // No-Execute (data pages should have this)
 
 // Common combinations
 #define VMM_KERNEL_RW  (VMM_PRESENT | VMM_WRITE)
 #define VMM_KERNEL_RO  (VMM_PRESENT)
+#define VMM_MMIO       (VMM_PRESENT | VMM_WRITE | VMM_CACHE_DISABLE)
 
 // -------------------------------------------------------------------
 // VMM PUBLIC API
