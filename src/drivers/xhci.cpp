@@ -31,6 +31,21 @@
 // Runtime Registers Offset (from capabilities)
 #define XHCI_RTSOFF         0x18
 
+// Doorbell Array Offset (from capabilities)
+#define XHCI_DBOFF          0x14
+
+// Port Registers Offset (from operational base)
+#define XHCI_PORTSC_BASE    0x400
+
+// PORTSC bits
+#define PORTSC_CCS          (1 << 0)  // Current Connect Status
+#define PORTSC_PED          (1 << 1)  // Port Enabled/Disabled
+#define PORTSC_PR           (1 << 4)  // Port Reset
+#define PORTSC_PLS_MASK     (0xF << 5)// Port Link State
+#define PORTSC_PP           (1 << 9)  // Port Power
+#define PORTSC_PRC          (1 << 21) // Port Reset Change
+#define PORTSC_WRC          (1 << 19) // Warm Port Reset Change
+
 struct ERST_Entry {
     uint64_t ring_segment_base_address;
     uint32_t ring_segment_size; // Number of TRBs
@@ -55,6 +70,11 @@ void XHCI::write64(uint32_t offset, uint64_t value) {
 uint64_t XHCI::read64(uint32_t offset) {
     volatile uint64_t* ptr = reinterpret_cast<volatile uint64_t*>(m_mmio_base + offset);
     return *ptr;
+}
+
+void XHCI::ring_doorbell(uint8_t doorbell, uint32_t target) {
+    uint32_t db_off = read32(XHCI_DBOFF) & ~0x3;
+    write32(db_off + (doorbell * 4), target);
 }
 
 bool XHCI::reset_controller() {
@@ -173,6 +193,97 @@ bool XHCI::start_controller() {
     return true;
 }
 
+void XHCI::enumerate_ports() {
+    uint32_t op_base = m_cap_length;
+    
+    for (uint32_t i = 1; i <= m_max_ports; i++) {
+        uint32_t portsc_offset = op_base + XHCI_PORTSC_BASE + (0x10 * (i - 1));
+        uint32_t portsc = read32(portsc_offset);
+        
+        // Bit 0 is CCS (Current Connect Status)
+        if (portsc & PORTSC_CCS) {
+            if (g_vga) {
+                g_vga->write("xHCI: Device DETECTED on Port ");
+                char buf[3];
+                buf[0] = (i / 10) + '0';
+                buf[1] = (i % 10) + '0';
+                if (buf[0] == '0') {
+                    buf[0] = buf[1];
+                    buf[1] = '\0';
+                } else {
+                    buf[2] = '\0';
+                }
+                g_vga->write(buf);
+                g_vga->write("!\n");
+            }
+            
+            // Reset the port to negotiate speed and start enumeration
+            reset_port(i);
+        }
+    }
+}
+
+void XHCI::reset_port(uint32_t port_num) {
+    uint32_t op_base = m_cap_length;
+    uint32_t portsc_offset = op_base + XHCI_PORTSC_BASE + (0x10 * (port_num - 1));
+    
+    uint32_t portsc = read32(portsc_offset);
+    
+    // Clear status change bits to avoid clearing them accidentally
+    portsc &= ~((1<<17) | (1<<18) | (1<<19) | (1<<20) | (1<<21) | (1<<22));
+    
+    // Issue Port Reset
+    portsc |= PORTSC_PR;
+    write32(portsc_offset, portsc);
+    
+    // Wait for Port Reset Change
+    while ((read32(portsc_offset) & PORTSC_PRC) == 0) {
+        // Spin wait (a real driver should yield or timeout)
+    }
+    
+    // Clear PRC
+    portsc = read32(portsc_offset);
+    portsc &= ~((1<<17) | (1<<18) | (1<<19) | (1<<20) | (1<<22));
+    portsc |= PORTSC_PRC; // Write 1 to clear
+    write32(portsc_offset, portsc);
+    
+    if (g_vga) g_vga->write("xHCI: Port Reset Complete. Issuing Enable Slot...\n");
+    
+    // Send Enable Slot Command
+    TRB cmd = {0};
+    cmd.control = (TRB_CMD_ENABLE_SLOT << 10);
+    send_command(cmd);
+}
+
+void XHCI::send_command(const TRB& trb) {
+    TRB* cmd_ring = reinterpret_cast<TRB*>(m_cmd_ring_phys + pmm_hhdm_offset());
+    
+    TRB new_trb = trb;
+    if (m_cmd_ring_pcs) {
+        new_trb.control |= 1; // Cycle bit
+    } else {
+        new_trb.control &= ~1;
+    }
+    
+    cmd_ring[m_cmd_ring_index] = new_trb;
+    m_cmd_ring_index++;
+    
+    if (m_cmd_ring_index == 255) {
+        // Handle Link TRB to wrap around (simplified)
+        TRB link_trb = {0};
+        link_trb.parameter1 = m_cmd_ring_phys & 0xFFFFFFFF;
+        link_trb.parameter2 = (m_cmd_ring_phys >> 32) & 0xFFFFFFFF;
+        link_trb.control = (TRB_LINK << 10) | (1 << 1); // Toggle Cycle
+        if (m_cmd_ring_pcs) link_trb.control |= 1;
+        
+        cmd_ring[m_cmd_ring_index] = link_trb;
+        m_cmd_ring_pcs = !m_cmd_ring_pcs;
+        m_cmd_ring_index = 0;
+    }
+    
+    ring_doorbell(0, 0); // Doorbell 0 is Host Controller (Command Ring)
+}
+
 bool XHCI::start() {
     if (!g_pci) return false;
     
@@ -208,6 +319,9 @@ bool XHCI::start() {
 
     if (!start_controller()) return false;
 
+    // Detect connected devices immediately after starting
+    enumerate_ports();
+
     return true;
 }
 
@@ -236,10 +350,39 @@ void XHCI::handle_interrupt() {
         write32(ir0_base + 0x00, iman | 1); // Write 1 to clear IP
     }
     
-    if (g_vga) {
-        g_vga->write("xHCI: INTERRUPT RECEIVED!\n");
+    // Parse Event Ring
+    TRB* event_ring = reinterpret_cast<TRB*>(m_event_ring_phys + pmm_hhdm_offset());
+    TRB current_event = event_ring[m_event_ring_index];
+    
+    bool event_cycle = (current_event.control & 1) != 0;
+    if (event_cycle == m_event_ring_ccs) {
+        uint32_t trb_type = (current_event.control >> 10) & 0x3F;
+        
+        if (trb_type == TRB_EVENT_CMD_COMPLETION) {
+            uint32_t slot_id = (current_event.control >> 24) & 0xFF;
+            if (g_vga) {
+                g_vga->write("xHCI: Command Completed! Device assigned Slot ID: ");
+                char buf[2];
+                buf[0] = slot_id + '0';
+                buf[1] = '\0';
+                g_vga->write(buf);
+                g_vga->write("\n");
+            }
+        } else if (trb_type == TRB_EVENT_PORT_STATUS) {
+            if (g_vga) g_vga->write("xHCI: Port Status Change Event Received.\n");
+        }
+        
+        m_event_ring_index++;
+        if (m_event_ring_index == 256) {
+            m_event_ring_index = 0;
+            m_event_ring_ccs = !m_event_ring_ccs;
+        }
+        
+        // Update ERDP
+        uintptr_t current_trb_phys = m_event_ring_phys + (m_event_ring_index * sizeof(TRB));
+        write64(ir0_base + 0x18, current_trb_phys | 0x08); // ERDP + EHB
     }
-
+    
     // Acknowledge interrupt to LAPIC
     extern void lapic_eoi();
     lapic_eoi();

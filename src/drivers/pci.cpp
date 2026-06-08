@@ -56,16 +56,16 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
         uint32_t cap_header = read(bus, device, func, cap_ptr);
         uint8_t cap_id = cap_header & 0xFF;
         
-        // Debug print to see what capabilities QEMU xHCI exposes
-        if (g_vga) {
-            g_vga->write("    PCI Cap found: 0x");
-            char buf[3];
-            buf[0] = (cap_id >> 4) < 10 ? '0' + (cap_id >> 4) : 'A' + (cap_id >> 4) - 10;
-            buf[1] = (cap_id & 0x0F) < 10 ? '0' + (cap_id & 0x0F) : 'A' + (cap_id & 0x0F) - 10;
-            buf[2] = '\0';
-            g_vga->write(buf);
-            g_vga->write("\n");
-        }
+        // // Debug print to see what capabilities QEMU xHCI exposes
+        // if (g_vga) {
+        //     g_vga->write("    PCI Cap found: 0x");
+        //     char buf[3];
+        //     buf[0] = (cap_id >> 4) < 10 ? '0' + (cap_id >> 4) : 'A' + (cap_id >> 4) - 10;
+        //     buf[1] = (cap_id & 0x0F) < 10 ? '0' + (cap_id & 0x0F) : 'A' + (cap_id & 0x0F) - 10;
+        //     buf[2] = '\0';
+        //     g_vga->write(buf);
+        //     g_vga->write("\n");
+        // }
         
         if (cap_id == 0x05) { // MSI Capability
             uint16_t msg_ctrl = (cap_header >> 16) & 0xFFFF;
@@ -88,7 +88,7 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
             uint32_t new_header = (cap_header & 0x0000FFFF) | ((uint32_t)msg_ctrl << 16);
             write(bus, device, func, cap_ptr, new_header);
             
-            if (g_vga) g_vga->write("    -> MSI Configured!\n");
+            // if (g_vga) g_vga->write("    -> MSI Configured!\n");
             return true;
         } else if (cap_id == 0x11) { // MSI-X Capability
             uint16_t msg_ctrl = (cap_header >> 16) & 0xFFFF;
@@ -129,7 +129,7 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
             uint32_t new_header = (cap_header & 0x0000FFFF) | ((uint32_t)msg_ctrl << 16);
             write(bus, device, func, cap_ptr, new_header);
             
-            if (g_vga) g_vga->write("    -> MSI-X Configured!\n");
+            // if (g_vga) g_vga->write("    -> MSI-X Configured!\n");
             return true;
         }
         
@@ -142,15 +142,15 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
 void PCI::print_device(const PCIDevice& dev) {
     if (!g_vga) return;
     
-    g_vga->write("PCI ");
-    print_hex(dev.bus, 2); g_vga->write(":");
-    print_hex(dev.device, 2); g_vga->write(":");
-    print_hex(dev.function, 1); g_vga->write(" | ");
+    // g_vga->write("PCI ");
+    // print_hex(dev.bus, 2); g_vga->write(":");
+    // print_hex(dev.device, 2); g_vga->write(":");
+    // print_hex(dev.function, 1); g_vga->write(" | ");
     
-    print_hex(dev.vendor_id, 4); g_vga->write(":");
-    print_hex(dev.device_id, 4); g_vga->write(" | Class: ");
-    print_hex(dev.class_code, 2); g_vga->write(":");
-    print_hex(dev.subclass, 2); g_vga->write("\n");
+    // print_hex(dev.vendor_id, 4); g_vga->write(":");
+    // print_hex(dev.device_id, 4); g_vga->write(" | Class: ");
+    // print_hex(dev.class_code, 2); g_vga->write(":");
+    // print_hex(dev.subclass, 2); g_vga->write("\n");
 }
 
 void PCI::check_function(uint8_t bus, uint8_t device, uint8_t func) {
@@ -193,9 +193,9 @@ void PCI::check_function(uint8_t bus, uint8_t device, uint8_t func) {
         cmd |= (1 << 2) | (1 << 1);
         write(bus, device, func, 0x04, cmd);
         
-        if (g_vga) {
-            g_vga->write("  -> xHCI Controller Found and Enabled!\n");
-        }
+        // if (g_vga) {
+        //     g_vga->write("  -> xHCI Controller Found and Enabled!\n");
+        // }
     }
 }
 
@@ -223,9 +223,9 @@ void PCI::check_bus(uint8_t bus) {
 }
 
 bool PCI::start() {
-    if (g_vga) {
-        g_vga->write("Scanning PCI Bus...\n");
-    }
+    // if (g_vga) {
+    //     g_vga->write("Scanning PCI Bus...\n");
+    // }
     
     // In a full implementation we would check the MCFG table via ACPI.
     // For now, standard Port I/O works well for buses 0-255.
