@@ -232,6 +232,8 @@ bool PMM::start() {
 
     // 4. The s_page_order array takes 1 byte per page. Find space for it in RAM.
     uint64_t state_array_size = s_total_pages; 
+    // MUST align to PAGE_SIZE to keep buddy allocator blocks aligned!
+    state_array_size = (state_array_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     
     for (uint64_t i = 0; i < g_memmap_request.response->entry_count; i++) {
         struct limine_memmap_entry* entry = g_memmap_request.response->entries[i];
