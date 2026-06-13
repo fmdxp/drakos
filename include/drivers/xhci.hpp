@@ -15,8 +15,14 @@ struct TRB {
 } __attribute__((packed));
 
 // TRB Types
+#define TRB_NORMAL               1
+#define TRB_SETUP_STAGE          2
+#define TRB_DATA_STAGE           3
+#define TRB_STATUS_STAGE         4
 #define TRB_LINK                 6
 #define TRB_CMD_ENABLE_SLOT      9
+#define TRB_CMD_ADDRESS_DEVICE   11
+#define TRB_EVENT_TRANSFER       32
 #define TRB_EVENT_CMD_COMPLETION 33
 #define TRB_EVENT_PORT_STATUS    34
 
@@ -48,6 +54,20 @@ private:
     uint32_t m_current_port_num = 0;
     uint32_t m_current_port_speed = 0;
     
+    // EP0 Transfer Rings per slot
+    uintptr_t m_ep0_rings_phys[256] = {0};
+    uint32_t  m_ep0_ring_indices[256] = {0};
+    bool      m_ep0_ring_pcs[256] = {false};
+    
+    // Interrupt Transfer Rings (Simplified: 1 per slot, hardcoded to whatever EP is configured)
+    uintptr_t m_int_rings_phys[256] = {0};
+    uint32_t  m_int_ring_indices[256] = {0};
+    bool      m_int_ring_pcs[256] = {false};
+    uint8_t   m_int_ep_dci[256] = {0}; // The DCI index used for the interrupt ring
+    
+    volatile bool m_transfer_complete = false;
+    volatile bool m_port_setup_complete = false;
+    
     // Helper to read MMIO
     uint32_t read32(uint32_t offset);
     void write32(uint32_t offset, uint32_t value);
@@ -66,7 +86,12 @@ private:
     void configure_slot(uint32_t slot_id, uint32_t port_speed, uint32_t port_num);
 
 public:
+    bool do_control_transfer(uint32_t slot_id, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, uint16_t length, void* buffer_phys);
+    bool configure_endpoint(uint32_t slot_id, uint8_t ep_num, uint8_t ep_type, uint16_t max_packet_size, uint8_t interval);
+    bool submit_interrupt_in(uint32_t slot_id, void* buffer_phys, uint32_t length);
+    
     void handle_interrupt();
+    void poll_event_ring();
 };
 
 extern XHCI* g_xhci;

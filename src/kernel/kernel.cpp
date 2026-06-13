@@ -26,6 +26,7 @@
 #include "vga.hpp"
 #include "panic.hpp"
 #include "serial.hpp"
+#include "usb/usb.hpp"
 
 volatile struct limine_framebuffer_request g_framebuffer_request =
 {
@@ -71,8 +72,14 @@ extern "C" [[noreturn]] void _start(void)
 
     if (!g_vga) panic("VGA did not init");
 
-    g_vga->write("Welcome to drakos!");
+    g_vga->write("Welcome to drakos!\n");
     
-    
-    while (1) asm volatile("hlt");
+    // Main kernel loop: process deferred USB device initialization
+    // and poll gamepad input. Runs with interrupts enabled (sti from GDT init).
+    while (1) {
+        // Process any USB devices that were registered during an interrupt
+        if (g_usb_manager) g_usb_manager->update();
+        
+        asm volatile("hlt"); // Sleep until next interrupt
+    }
 }

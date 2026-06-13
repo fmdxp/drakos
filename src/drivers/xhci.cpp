@@ -3,6 +3,8 @@
 #include "pmm.hpp"
 #include "vmm.hpp"
 #include "vga.hpp"
+#include "input/dualsense.hpp"
+#include "usb/usb.hpp"
 
 // Capability Registers Offsets
 #define XHCI_CAPLENGTH      0x00
@@ -218,7 +220,12 @@ void XHCI::enumerate_ports() {
             }
             
             // Reset the port to negotiate speed and start enumeration
+            m_port_setup_complete = false;
             reset_port(i);
+            
+            while (!m_port_setup_complete) {
+                // Wait for the interrupt handler to finish setting up this port
+            }
         }
     }
 }
@@ -386,6 +393,10 @@ void XHCI::configure_slot(uint32_t slot_id, uint32_t port_speed, uint32_t port_n
     in_ctx[ep0_ctx_idx + 2] = ep0_ring_phys & 0xFFFFFFFF; // TR Dequeue Pointer Low
     in_ctx[ep0_ctx_idx + 3] = (ep0_ring_phys >> 32) & 0xFFFFFFFF; // TR Dequeue Pointer High
     in_ctx[ep0_ctx_idx + 2] |= 1; // DCS bit (Dequeue Cycle State)
+    
+    m_ep0_rings_phys[slot_id] = ep0_ring_phys;
+    m_ep0_ring_indices[slot_id] = 0;
+    m_ep0_ring_pcs[slot_id] = true;
 
     // 3. Send Address Device Command (TRB Type 11)
     TRB cmd = {0};
@@ -396,38 +407,166 @@ void XHCI::configure_slot(uint32_t slot_id, uint32_t port_speed, uint32_t port_n
     send_command(cmd);
 }
 
-void XHCI::handle_interrupt() {
-    uint32_t op_base = m_cap_length;
+bool XHCI::do_control_transfer(uint32_t slot_id, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, uint16_t length, void* buffer_phys) {
+    uintptr_t ring_phys = m_ep0_rings_phys[slot_id];
+    if (ring_phys == 0) return false;
     
-    // Clear Event Interrupt Status
-    uint32_t sts = read32(op_base + XHCI_USBSTS);
-    if (sts & USBSTS_EINT) {
-        write32(op_base + XHCI_USBSTS, USBSTS_EINT); // Write 1 to clear
+    TRB* ep0_ring = reinterpret_cast<TRB*>(ring_phys + pmm_hhdm_offset());
+    uint32_t& ring_idx = m_ep0_ring_indices[slot_id];
+    bool& pcs = m_ep0_ring_pcs[slot_id];
+    
+    auto enqueue_trb = [&](TRB& trb) {
+        if (pcs) trb.control |= 1; else trb.control &= ~1;
+        ep0_ring[ring_idx] = trb;
+        ring_idx++;
+    };
+    
+    TRB setup = {0};
+    setup.parameter1 = request_type | (request << 8) | (value << 16);
+    setup.parameter2 = index | (length << 16);
+    setup.status = 8;
+    uint32_t trt = length > 0 ? 3 : 0; 
+    setup.control = (TRB_SETUP_STAGE << 10) | (trt << 16) | (1 << 6);
+    enqueue_trb(setup);
+    
+    if (length > 0) {
+        TRB data = {0};
+        data.parameter1 = reinterpret_cast<uintptr_t>(buffer_phys) & 0xFFFFFFFF;
+        data.parameter2 = (reinterpret_cast<uintptr_t>(buffer_phys) >> 32) & 0xFFFFFFFF;
+        data.status = length;
+        uint32_t dir = (request_type & 0x80) ? 1 : 0;
+        data.control = (TRB_DATA_STAGE << 10) | (dir << 16);
+        enqueue_trb(data);
     }
     
+    TRB status = {0};
+    uint32_t dir = (request_type & 0x80) ? 0 : 1;
+    if (length == 0) dir = 1;
+    status.control = (TRB_STATUS_STAGE << 10) | (dir << 16) | (1 << 5);
+    enqueue_trb(status);
+    
+    m_transfer_complete = false;
+    ring_doorbell(slot_id, 1);
+    
+    while (!m_transfer_complete) {
+        asm volatile("pause");
+    }
+    
+    return true;
+}
+
+bool XHCI::configure_endpoint(uint32_t slot_id, uint8_t ep_num, uint8_t ep_type, uint16_t max_packet_size, uint8_t interval) {
+    uintptr_t in_ctx_phys = pmm_alloc(1);
+    uint32_t* in_ctx = reinterpret_cast<uint32_t*>(in_ctx_phys + pmm_hhdm_offset());
+    for(int i = 0; i < 1024; i++) in_ctx[i] = 0;
+    
+    uint8_t dci = (ep_num * 2) + 1; // Assuming IN endpoint
+    m_int_ep_dci[slot_id] = dci;
+    
+    uint32_t hccparams1 = read32(0x10);
+    bool csz = (hccparams1 & (1 << 2)) != 0;
+    uint32_t ctx_size = csz ? 64 : 32;
+    uint32_t ep_ctx_idx = (ctx_size * dci) / 4;
+    
+    in_ctx[1] = (1 << 0) | (1 << dci); // Add Slot and EP
+    
+    uint32_t slot_ctx_idx = ctx_size / 4;
+    in_ctx[slot_ctx_idx + 0] = (dci << 27); // Context Entries
+    
+    in_ctx[ep_ctx_idx + 0] = (interval << 16);
+    in_ctx[ep_ctx_idx + 1] = (3 << 1) | (ep_type << 3) | (max_packet_size << 16);
+    
+    uintptr_t ring_phys = pmm_alloc(1);
+    in_ctx[ep_ctx_idx + 2] = ring_phys & 0xFFFFFFFF;
+    in_ctx[ep_ctx_idx + 3] = (ring_phys >> 32) & 0xFFFFFFFF;
+    in_ctx[ep_ctx_idx + 2] |= 1; // DCS
+    
+    m_int_rings_phys[slot_id] = ring_phys;
+    m_int_ring_indices[slot_id] = 0;
+    m_int_ring_pcs[slot_id] = true;
+    
+    in_ctx[ep_ctx_idx + 4] = max_packet_size;
+    
+    TRB cmd = {0};
+    cmd.parameter1 = in_ctx_phys & 0xFFFFFFFF;
+    cmd.parameter2 = (in_ctx_phys >> 32) & 0xFFFFFFFF;
+    cmd.control = (12 << 10) | (slot_id << 24); // Configure Endpoint TRB
+    
+    m_transfer_complete = false;
+    send_command(cmd);
+    
+    while (!m_transfer_complete) {
+        asm volatile("pause");
+    }
+    
+    if (g_vga) g_vga->write("xHCI: Interrupt Endpoint Configured!\n");
+    return true;
+}
+
+bool XHCI::submit_interrupt_in(uint32_t slot_id, void* buffer_phys, uint32_t length) {
+    uintptr_t ring_phys = m_int_rings_phys[slot_id];
+    if (ring_phys == 0) return false;
+    
+    TRB* ring = reinterpret_cast<TRB*>(ring_phys + pmm_hhdm_offset());
+    uint32_t& ring_idx = m_int_ring_indices[slot_id];
+    bool& pcs = m_int_ring_pcs[slot_id];
+    
+    TRB trb = {0};
+    trb.parameter1 = reinterpret_cast<uintptr_t>(buffer_phys) & 0xFFFFFFFF;
+    trb.parameter2 = (reinterpret_cast<uintptr_t>(buffer_phys) >> 32) & 0xFFFFFFFF;
+    trb.status = length;
+    trb.control = (TRB_NORMAL << 10) | (1 << 5); // Normal TRB, IOC
+    
+    if (pcs) trb.control |= 1; else trb.control &= ~1;
+    ring[ring_idx] = trb;
+    ring_idx++;
+    
+    // Simplified wrap-around for prototype (not full Link TRB support)
+    if (ring_idx == 255) {
+        ring_idx = 0;
+        pcs = !pcs;
+    }
+    
+    ring_doorbell(slot_id, m_int_ep_dci[slot_id]);
+    return true;
+}
+
+void XHCI::poll_event_ring() {
     uint32_t rts_off = read32(XHCI_RTSOFF) & ~0x1F;
     uint32_t ir0_base = rts_off + 0x0020;
     
-    // Clear Interrupt Pending in IMAN
-    uint32_t iman = read32(ir0_base + 0x00);
-    if (iman & 1) {
-        write32(ir0_base + 0x00, iman | 1); // Write 1 to clear IP
-    }
-    
-    // Parse Event Ring
     TRB* event_ring = reinterpret_cast<TRB*>(m_event_ring_phys + pmm_hhdm_offset());
-    TRB current_event = event_ring[m_event_ring_index];
     
-    bool event_cycle = (current_event.control & 1) != 0;
-    if (event_cycle == m_event_ring_ccs) {
+    while (true) {
+        TRB current_event = event_ring[m_event_ring_index];
+        bool event_cycle = (current_event.control & 1) != 0;
+        
+        if (event_cycle != m_event_ring_ccs) {
+            break; // No more events
+        }
+        
+        // Advance ring pointer BEFORE processing callbacks to prevent re-entrancy issues
+        m_event_ring_index++;
+        if (m_event_ring_index == 256) {
+            m_event_ring_index = 0;
+            m_event_ring_ccs = !m_event_ring_ccs;
+        }
+        
+        // Update ERDP to tell hardware we processed this TRB (must point to NEXT TRB)
+        uintptr_t next_trb_phys = m_event_ring_phys + (m_event_ring_index * sizeof(TRB));
+        write64(ir0_base + 0x18, next_trb_phys | 0x08); // ERDP + EHB
+        
         uint32_t trb_type = (current_event.control >> 10) & 0x3F;
         
         if (trb_type == TRB_EVENT_CMD_COMPLETION) {
             uint32_t slot_id = (current_event.control >> 24) & 0xFF;
             uint32_t cmd_completion_code = (current_event.status >> 24) & 0xFF;
             
-            // To be precise we should read the physical pointer in current_event.parameter1 to know exactly which command completed.
-            // For now, if we get a Slot ID, we assume it's the Enable Slot or Address Device completion.
+            uintptr_t cmd_trb_phys = current_event.parameter1 | (static_cast<uint64_t>(current_event.parameter2) << 32);
+            uint32_t cmd_trb_offset = cmd_trb_phys - m_cmd_ring_phys;
+            TRB* cmd_ring = reinterpret_cast<TRB*>(m_cmd_ring_phys + pmm_hhdm_offset());
+            uint32_t cmd_type = (cmd_ring[cmd_trb_offset / sizeof(TRB)].control >> 10) & 0x3F;
+            
             if (g_vga) {
                 g_vga->write("xHCI: Command Completed. Code: ");
                 char buf[3];
@@ -442,41 +581,57 @@ void XHCI::handle_interrupt() {
                 g_vga->write("\n");
             }
             
-            // Very simple state machine for the prototype
-            // If we just got a Slot ID (Enable Slot success), configure it
             if (cmd_completion_code == 1 && slot_id > 0) {
-                // Determine which command just completed by assuming state.
-                // In a real driver, we'd check the command TRB parameter.
-                // For now, if Address Device succeeded, tell the user!
-                // We assume if m_current_port_speed is set, and it's the first Enable Slot, we call configure_slot.
-                // Wait, if configure_slot completes, it ALSO generates a Command Completion with code 1.
-                // To prevent infinite loop, we only configure slot if we haven't done it yet.
-                static bool addressed = false;
-                if (!addressed) {
+                if (cmd_type == TRB_CMD_ENABLE_SLOT) {
                     configure_slot(slot_id, m_current_port_speed, m_current_port_num);
-                    addressed = true;
-                } else {
+                } else if (cmd_type == TRB_CMD_ADDRESS_DEVICE) {
                     if (g_vga) g_vga->write("xHCI: Device Addressed Successfully! USB setup complete!\n");
-                    g_usb_manager->register_device(slot_id, this);
+                    if (g_usb_manager) g_usb_manager->register_device(slot_id, this);
+                    m_port_setup_complete = true;
+                } else if (cmd_type == 12) { // Configure Endpoint
+                    m_transfer_complete = true;
                 }
             } else if (cmd_completion_code != 1) {
                 if (g_vga) g_vga->write("xHCI: TRB ERROR! Check context structures.\n");
+                m_port_setup_complete = true;
+                m_transfer_complete = true;
             }
             
+        } else if (trb_type == TRB_EVENT_TRANSFER) {
+            // Check which endpoint triggered this: if it's the Interrupt IN (not EP0),
+            // route to the gamepad driver; otherwise it's a Control Transfer completion.
+            uint32_t ep_id = (current_event.control >> 16) & 0x1F;
+            if (ep_id > 1 && g_dualsense_driver) {
+                // Interrupt IN from DualSense - parse HID report
+                g_dualsense_driver->on_report_received();
+            } else {
+                // EP0 Control Transfer completed
+                m_transfer_complete = true;
+            }
         } else if (trb_type == TRB_EVENT_PORT_STATUS) {
             if (g_vga) g_vga->write("xHCI: Port Status Change Event Received.\n");
         }
-        
-        m_event_ring_index++;
-        if (m_event_ring_index == 256) {
-            m_event_ring_index = 0;
-            m_event_ring_ccs = !m_event_ring_ccs;
-        }
-        
-        // Update ERDP
-        uintptr_t current_trb_phys = m_event_ring_phys + (m_event_ring_index * sizeof(TRB));
-        write64(ir0_base + 0x18, current_trb_phys | 0x08); // ERDP + EHB
     }
+}
+
+void XHCI::handle_interrupt() {
+    uint32_t op_base = m_cap_length;
+    uint32_t rts_off = read32(XHCI_RTSOFF) & ~0x1F;
+    uint32_t ir0_base = rts_off + 0x0020;
+    
+    // Clear Event Interrupt Status
+    uint32_t sts = read32(op_base + XHCI_USBSTS);
+    if (sts & USBSTS_EINT) {
+        write32(op_base + XHCI_USBSTS, USBSTS_EINT); // Write 1 to clear
+    }
+    
+    // Clear IP if set
+    uint32_t iman = read32(ir0_base + 0x00);
+    if (iman & 1) {
+        write32(ir0_base + 0x00, iman | 1); // Write 1 to clear IP
+    }
+    
+    poll_event_ring();
     
     // Acknowledge interrupt to LAPIC
     extern void lapic_eoi();

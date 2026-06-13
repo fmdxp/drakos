@@ -3,8 +3,17 @@
 
 namespace Input {
 
+enum class GamepadType {
+    Unknown,
+    PlayStation4,
+    PlayStation5,
+    Xbox,
+    ProController
+};
+
 struct GamepadState {
     bool connected;
+    GamepadType type;
     
     // Buttons
     bool dpad_up;
@@ -37,9 +46,21 @@ struct GamepadState {
     uint8_t right_trigger;
 };
 
-class InputManager {
+class GamepadDriver {
+protected:
+    int m_gamepad_index = -1;
+public:
+    virtual ~GamepadDriver() = default;
+    virtual void process_input() = 0;
+};
+
+class GamepadManager {
 public:
     static GamepadState gamepads[4];
+    
+    // Assegna il primo slot libero a un nuovo gamepad
+    static int register_gamepad(GamepadType type);
+    
     static GamepadState* get_gamepad(int index) {
         if (index >= 0 && index < 4) return &gamepads[index];
         return nullptr;
