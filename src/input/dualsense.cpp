@@ -33,6 +33,24 @@ void DualSenseDriver::prime_interrupt() {
 }
 
 void DualSenseDriver::on_report_received() {
+    // Debug print the first 10 bytes of the report
+    static int debug_prints = 0;
+    if (g_vga && debug_prints < 10) {
+        g_vga->write("DualSense: Report Bytes: ");
+        for (int i = 0; i < 10; i++) {
+            char buf[3];
+            uint8_t val = m_report_buf_virt[i];
+            const char* hex = "0123456789ABCDEF";
+            buf[0] = hex[val >> 4];
+            buf[1] = hex[val & 0x0F];
+            buf[2] = '\0';
+            g_vga->write(buf);
+            g_vga->write(" ");
+        }
+        g_vga->write("\n");
+        debug_prints++;
+    }
+
     // Called by xHCI ISR when TRB_EVENT_TRANSFER fires for this slot
     parse_report(m_report_buf_virt);
 
@@ -47,11 +65,12 @@ void DualSenseDriver::parse_report(const uint8_t* r) {
     // Byte 2:   Left Stick Y
     // Byte 3:   Right Stick X
     // Byte 4:   Right Stick Y
-    // Byte 5:   D-pad (nibble) + face buttons (nibble) -> lower nibble = dpad, upper nibble = square/cross/circle/triangle
-    // Byte 6:   R3 | L3 | Options | Create | R1 | L1 | (lower bits)
-    // Byte 7:   Touch | PS | Mute | (lower bits)
-    // Byte 8:   L2 analog
-    // Byte 9:   R2 analog
+    // Byte 5:   L2 Trigger (Analog)
+    // Byte 6:   R2 Trigger (Analog)
+    // Byte 7:   Sequence Number
+    // Byte 8:   D-pad (nibble) + face buttons (nibble)
+    // Byte 9:   L1/R1, Share, Options, L3, R3
+    // Byte 10:  PS Button, Touchpad Click
 
     if (r[0] != 0x01) return; // Ignore non-standard reports
 
@@ -65,32 +84,32 @@ void DualSenseDriver::parse_report(const uint8_t* r) {
     state->right_stick_y = r[4];
 
     // Triggers (analog)
-    state->left_trigger  = r[8];
-    state->right_trigger = r[9];
+    state->left_trigger  = r[5];
+    state->right_trigger = r[6];
 
-    // D-Pad (lower nibble of byte 5)
-    uint8_t dpad = r[5] & 0x0F;
+    // D-Pad (lower nibble of byte 8)
+    uint8_t dpad = r[8] & 0x0F;
     state->dpad_up    = (dpad == 0 || dpad == 1 || dpad == 7);
     state->dpad_right = (dpad == 1 || dpad == 2 || dpad == 3);
     state->dpad_down  = (dpad == 3 || dpad == 4 || dpad == 5);
     state->dpad_left  = (dpad == 5 || dpad == 6 || dpad == 7);
 
-    // Face buttons (upper nibble of byte 5)
-    state->btn_x = (r[5] >> 4) & 1; // Square
-    state->btn_a = (r[5] >> 5) & 1; // Cross
-    state->btn_b = (r[5] >> 6) & 1; // Circle
-    state->btn_y = (r[5] >> 7) & 1; // Triangle
+    // Face buttons (upper nibble of byte 8)
+    state->btn_x = (r[8] >> 4) & 1; // Square
+    state->btn_a = (r[8] >> 5) & 1; // Cross
+    state->btn_b = (r[8] >> 6) & 1; // Circle
+    state->btn_y = (r[8] >> 7) & 1; // Triangle
 
-    // Shoulder / System buttons (byte 6)
-    state->btn_l1      = (r[6] >> 0) & 1;
-    state->btn_r1      = (r[6] >> 1) & 1;
-    state->btn_share   = (r[6] >> 4) & 1; // Create
-    state->btn_options = (r[6] >> 5) & 1;
-    state->btn_l3      = (r[6] >> 6) & 1;
-    state->btn_r3      = (r[6] >> 7) & 1;
+    // Shoulder / System buttons (byte 9)
+    state->btn_l1      = (r[9] >> 0) & 1;
+    state->btn_r1      = (r[9] >> 1) & 1;
+    state->btn_share   = (r[9] >> 4) & 1; // Create
+    state->btn_options = (r[9] >> 5) & 1;
+    state->btn_l3      = (r[9] >> 6) & 1;
+    state->btn_r3      = (r[9] >> 7) & 1;
 
-    // PS / Logo button (byte 7)
-    state->btn_logo = (r[7] >> 0) & 1;
+    // PS / Logo button (byte 10)
+    state->btn_logo = (r[10] >> 0) & 1;
 }
 
 void DualSenseDriver::process_input() {

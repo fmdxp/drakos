@@ -101,18 +101,29 @@ void USBManager::enumerate_device(uint8_t slot_id, XHCI* xhci) {
                                     reinterpret_cast<void*>(cfg_buf_phys));
     if (!ok) return;
     
-    // --- Step 4: Parse - find first Interrupt IN endpoint ---
+    // --- Step 4: Parse - find first Interrupt IN endpoint inside a HID Interface ---
     uint8_t* ptr = reinterpret_cast<uint8_t*>(cfg_buf_virt);
     uint8_t* end = ptr + total_len;
     uint8_t  int_in_ep         = 0;
     uint16_t int_in_max_packet = 64;
+    bool in_hid_interface = false;
     
     while (ptr < end) {
         uint8_t len  = ptr[0];
         uint8_t type = ptr[1];
         if (len == 0) break;
         
-        if (type == 5) { // Endpoint Descriptor
+        if (type == 4) { // Interface Descriptor
+            USBInterfaceDescriptor* intf = reinterpret_cast<USBInterfaceDescriptor*>(ptr);
+            // Class 3 is HID
+            if (intf->bInterfaceClass == 3) {
+                in_hid_interface = true;
+            } else {
+                in_hid_interface = false;
+            }
+        }
+        
+        if (type == 5 && in_hid_interface) { // Endpoint Descriptor
             USBEndpointDescriptor* ep = reinterpret_cast<USBEndpointDescriptor*>(ptr);
             bool is_interrupt_in = ((ep->bmAttributes & 0x03) == 3) &&
                                    ((ep->bEndpointAddress & 0x80) != 0);
@@ -133,6 +144,25 @@ void USBManager::enumerate_device(uint8_t slot_id, XHCI* xhci) {
         uint8_t cfg_val = reinterpret_cast<USBConfigDescriptor*>(cfg_buf_virt)->bConfigurationValue;
         xhci->do_control_transfer(slot_id, 0x00, 9, cfg_val, 0, 0,
                                    reinterpret_cast<void*>(pmm_alloc(1))); // dummy buf for status
+        
+        // SONY DUALSENSE "WAKE UP" PACKET
+        // The DualSense controller sometimes stays in a dummy state (sending only Sequence Counters and centered sticks)
+        // until the OS driver reads a Feature Report (like the MAC address - Feature Report 0x09).
+        uintptr_t in_buf_phys = pmm_alloc(1);
+        
+        // Find the interface number of the HID interface to send the GET_REPORT to
+        uint8_t hid_intf_num = 3; // Default for DualSense
+        ptr = reinterpret_cast<uint8_t*>(cfg_buf_virt);
+        while (ptr < end) {
+            if (ptr[1] == 4 && reinterpret_cast<USBInterfaceDescriptor*>(ptr)->bInterfaceClass == 3) {
+                hid_intf_num = reinterpret_cast<USBInterfaceDescriptor*>(ptr)->bInterfaceNumber;
+                break;
+            }
+            ptr += ptr[0];
+        }
+
+        // GET_REPORT: bmRequestType=0xA1, bRequest=0x01, wValue=0x0309 (Feature Report 0x09), wIndex=Interface, wLength=64
+        xhci->do_control_transfer(slot_id, 0xA1, 0x01, 0x0309, hid_intf_num, 64, reinterpret_cast<void*>(in_buf_phys));
         
         if (int_in_ep != 0) {
             g_dualsense_driver = new DualSenseDriver(slot_id, int_in_ep, int_in_max_packet, xhci);

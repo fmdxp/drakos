@@ -466,7 +466,8 @@ bool XHCI::configure_endpoint(uint32_t slot_id, uint8_t ep_num, uint8_t ep_type,
     uint32_t hccparams1 = read32(0x10);
     bool csz = (hccparams1 & (1 << 2)) != 0;
     uint32_t ctx_size = csz ? 64 : 32;
-    uint32_t ep_ctx_idx = (ctx_size * dci) / 4;
+    // In the Input Context, the index for EP dci is dci + 1 (Index 0 is Input Control, 1 is Slot)
+    uint32_t ep_ctx_idx = (ctx_size * (dci + 1)) / 4;
     
     in_ctx[1] = (1 << 0) | (1 << dci); // Add Slot and EP
     
@@ -484,6 +485,19 @@ bool XHCI::configure_endpoint(uint32_t slot_id, uint8_t ep_num, uint8_t ep_type,
     m_int_rings_phys[slot_id] = ring_phys;
     m_int_ring_indices[slot_id] = 0;
     m_int_ring_pcs[slot_id] = true;
+    
+    // Initialize Link TRB at the end of the ring (index 255)
+    TRB* ring = reinterpret_cast<TRB*>(ring_phys + pmm_hhdm_offset());
+    for (int i = 0; i < 256; i++) {
+        ring[i].parameter1 = 0;
+        ring[i].parameter2 = 0;
+        ring[i].status = 0;
+        ring[i].control = 0;
+    }
+    ring[255].parameter1 = ring_phys & 0xFFFFFFFF;
+    ring[255].parameter2 = (ring_phys >> 32) & 0xFFFFFFFF;
+    // Type 6 = Link TRB. Bit 1 = Toggle Cycle (TC).
+    ring[255].control = (6 << 10) | (1 << 1); 
     
     in_ctx[ep_ctx_idx + 4] = max_packet_size;
     
@@ -521,10 +535,17 @@ bool XHCI::submit_interrupt_in(uint32_t slot_id, void* buffer_phys, uint32_t len
     ring[ring_idx] = trb;
     ring_idx++;
     
-    // Simplified wrap-around for prototype (not full Link TRB support)
     if (ring_idx == 255) {
+        // We reached the Link TRB. We must update its Cycle Bit to match the CURRENT pcs
+        // so the hardware executes it and wraps around!
+        if (pcs) {
+            ring[255].control |= 1;
+        } else {
+            ring[255].control &= ~1;
+        }
+        
         ring_idx = 0;
-        pcs = !pcs;
+        pcs = !pcs; // Toggle internal state for the next pass
     }
     
     ring_doorbell(slot_id, m_int_ep_dci[slot_id]);
@@ -598,14 +619,48 @@ void XHCI::poll_event_ring() {
             }
             
         } else if (trb_type == TRB_EVENT_TRANSFER) {
-            // Check which endpoint triggered this: if it's the Interrupt IN (not EP0),
-            // route to the gamepad driver; otherwise it's a Control Transfer completion.
             uint32_t ep_id = (current_event.control >> 16) & 0x1F;
-            if (ep_id > 1 && g_dualsense_driver) {
-                // Interrupt IN from DualSense - parse HID report
-                g_dualsense_driver->on_report_received();
+            uint32_t completion_code = (current_event.status >> 24) & 0xFF;
+            uint32_t residual = current_event.status & 0xFFFFFF;
+            
+            if (ep_id > 1) {
+                static int evt_prints = 0;
+                if (g_vga && evt_prints < 10) {
+                    g_vga->write("xHCI: Transfer Event on EP ");
+                    char buf[3];
+                    buf[0] = ep_id + '0';
+                    buf[1] = '\0';
+                    if (ep_id > 9) {
+                        buf[0] = (ep_id / 10) + '0';
+                        buf[1] = (ep_id % 10) + '0';
+                        buf[2] = '\0';
+                    }
+                    g_vga->write(buf);
+                    g_vga->write(" Code: ");
+                    buf[0] = (completion_code / 10) + '0';
+                    buf[1] = (completion_code % 10) + '0';
+                    buf[2] = '\0';
+                    g_vga->write(buf);
+                    g_vga->write(" Resid: ");
+                    
+                    // Print residual length
+                    char res_buf[10];
+                    int idx = 0;
+                    uint32_t temp = residual;
+                    if (temp == 0) { res_buf[idx++] = '0'; }
+                    while (temp > 0) { res_buf[idx++] = (temp % 10) + '0'; temp /= 10; }
+                    for (int i = 0; i < idx / 2; i++) { char t = res_buf[i]; res_buf[i] = res_buf[idx - 1 - i]; res_buf[idx - 1 - i] = t; }
+                    res_buf[idx] = '\0';
+                    g_vga->write(res_buf);
+                    g_vga->write("\n");
+                    
+                    evt_prints++;
+                }
+                if (g_dualsense_driver) {
+                    // Pass residual so driver knows actual length
+                    g_dualsense_driver->on_report_received();
+                }
             } else {
-                // EP0 Control Transfer completed
                 m_transfer_complete = true;
             }
         } else if (trb_type == TRB_EVENT_PORT_STATUS) {
