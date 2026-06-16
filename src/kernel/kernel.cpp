@@ -94,6 +94,22 @@ extern "C" [[noreturn]] void _start(void)
             if (gp->dpad_down != last_gp_state.dpad_down) changed = true;
             if (gp->dpad_left != last_gp_state.dpad_left) changed = true;
             if (gp->dpad_right != last_gp_state.dpad_right) changed = true;
+            if (gp->btn_l1 != last_gp_state.btn_l1) changed = true;
+            if (gp->btn_r1 != last_gp_state.btn_r1) changed = true;
+            if (gp->btn_l3 != last_gp_state.btn_l3) changed = true;
+            if (gp->btn_r3 != last_gp_state.btn_r3) changed = true;
+            if (gp->btn_share != last_gp_state.btn_share) changed = true;
+            if (gp->btn_options != last_gp_state.btn_options) changed = true;
+            if (gp->btn_logo != last_gp_state.btn_logo) changed = true;
+            
+            // Analog sticks have jitter, so we use a deadzone of 2 to avoid infinite spam
+            auto diff = [](uint8_t a, uint8_t b) { return a > b ? a - b : b - a; };
+            if (diff(gp->left_stick_x, last_gp_state.left_stick_x) > 2) changed = true;
+            if (diff(gp->left_stick_y, last_gp_state.left_stick_y) > 2) changed = true;
+            if (diff(gp->right_stick_x, last_gp_state.right_stick_x) > 2) changed = true;
+            if (diff(gp->right_stick_y, last_gp_state.right_stick_y) > 2) changed = true;
+            if (diff(gp->left_trigger, last_gp_state.left_trigger) > 2) changed = true;
+            if (diff(gp->right_trigger, last_gp_state.right_trigger) > 2) changed = true;
             
             static uint32_t print_counter = 0;
             print_counter++;
@@ -105,26 +121,50 @@ extern "C" [[noreturn]] void _start(void)
 
             if (changed) {
                 g_vga->write("Gamepad 0: ");
-                if (gp->btn_a) g_vga->write("CROSS ");
-                if (gp->btn_b) g_vga->write("CIRCLE ");
-                if (gp->btn_x) g_vga->write("SQUARE ");
-                if (gp->btn_y) g_vga->write("TRIANGLE ");
+                if (gp->btn_a) g_vga->write("X ");
+                if (gp->btn_b) g_vga->write("O ");
+                if (gp->btn_x) g_vga->write("SQ ");
+                if (gp->btn_y) g_vga->write("TR ");
                 if (gp->dpad_up) g_vga->write("UP ");
-                if (gp->dpad_down) g_vga->write("DOWN ");
-                if (gp->dpad_left) g_vga->write("LEFT ");
-                if (gp->dpad_right) g_vga->write("RIGHT ");
+                if (gp->dpad_down) g_vga->write("DWN ");
+                if (gp->dpad_left) g_vga->write("LFT ");
+                if (gp->dpad_right) g_vga->write("RGT ");
+                
+                if (gp->btn_l1) g_vga->write("L1 ");
+                if (gp->btn_r1) g_vga->write("R1 ");
+                if (gp->btn_l3) g_vga->write("L3 ");
+                if (gp->btn_r3) g_vga->write("R3 ");
+                if (gp->btn_share) g_vga->write("SHR ");
+                if (gp->btn_options) g_vga->write("OPT ");
+                if (gp->btn_logo) g_vga->write("PS ");
                 
                 // Print analog values
-                char a_buf[32];
-                // basic quick hex conversion for L2/R2
+                char a_buf[128];
                 const char* hex = "0123456789ABCDEF";
-                a_buf[0] = ' '; a_buf[1] = 'L'; a_buf[2] = '2'; a_buf[3] = ':';
-                a_buf[4] = hex[(gp->left_trigger >> 4) & 0xF];
-                a_buf[5] = hex[gp->left_trigger & 0xF];
-                a_buf[6] = ' '; a_buf[7] = 'R'; a_buf[8] = '2'; a_buf[9] = ':';
-                a_buf[10] = hex[(gp->right_trigger >> 4) & 0xF];
-                a_buf[11] = hex[gp->right_trigger & 0xF];
-                a_buf[12] = '\0';
+                int i = 0;
+                
+                a_buf[i++] = ' '; a_buf[i++] = 'L'; a_buf[i++] = 'X'; a_buf[i++] = ':';
+                a_buf[i++] = hex[(gp->left_stick_x >> 4) & 0xF];
+                a_buf[i++] = hex[gp->left_stick_x & 0xF];
+                a_buf[i++] = ' '; a_buf[i++] = 'L'; a_buf[i++] = 'Y'; a_buf[i++] = ':';
+                a_buf[i++] = hex[(gp->left_stick_y >> 4) & 0xF];
+                a_buf[i++] = hex[gp->left_stick_y & 0xF];
+                
+                a_buf[i++] = ' '; a_buf[i++] = 'R'; a_buf[i++] = 'X'; a_buf[i++] = ':';
+                a_buf[i++] = hex[(gp->right_stick_x >> 4) & 0xF];
+                a_buf[i++] = hex[gp->right_stick_x & 0xF];
+                a_buf[i++] = ' '; a_buf[i++] = 'R'; a_buf[i++] = 'Y'; a_buf[i++] = ':';
+                a_buf[i++] = hex[(gp->right_stick_y >> 4) & 0xF];
+                a_buf[i++] = hex[gp->right_stick_y & 0xF];
+                
+                a_buf[i++] = ' '; a_buf[i++] = 'L'; a_buf[i++] = '2'; a_buf[i++] = ':';
+                a_buf[i++] = hex[(gp->left_trigger >> 4) & 0xF];
+                a_buf[i++] = hex[gp->left_trigger & 0xF];
+                a_buf[i++] = ' '; a_buf[i++] = 'R'; a_buf[i++] = '2'; a_buf[i++] = ':';
+                a_buf[i++] = hex[(gp->right_trigger >> 4) & 0xF];
+                a_buf[i++] = hex[gp->right_trigger & 0xF];
+                a_buf[i++] = '\0';
+                
                 g_vga->write(a_buf);
                 g_vga->write("\n");
                 
