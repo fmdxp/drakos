@@ -17,6 +17,9 @@ public:
     void prime_interrupt();
     
     void process_input() override;
+    
+    // Set the RGB color of the Lightbar
+    void set_led(uint8_t r, uint8_t g, uint8_t b);
 
 private:
     uint32_t m_slot_id;

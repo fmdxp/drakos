@@ -60,7 +60,7 @@ volatile struct limine_rsdp_request g_rsdp_request =
     .response = nullptr
 };
 
-extern "C" [[noreturn]] void _start(void)
+extern "C" [[noreturn]] void kernel_main(void)
 {
     // Execute all registered modules in order
     system_init_modules();
@@ -110,6 +110,10 @@ extern "C" [[noreturn]] void _start(void)
             if (diff(gp->right_stick_y, last_gp_state.right_stick_y) > 2) changed = true;
             if (diff(gp->left_trigger, last_gp_state.left_trigger) > 2) changed = true;
             if (diff(gp->right_trigger, last_gp_state.right_trigger) > 2) changed = true;
+            
+            if (gp->touchpad_touching_1 != last_gp_state.touchpad_touching_1) changed = true;
+            if (gp->touchpad_touching_1 && diff(gp->touchpad_x_1, last_gp_state.touchpad_x_1) > 2) changed = true;
+            if (gp->touchpad_touching_1 && diff(gp->touchpad_y_1, last_gp_state.touchpad_y_1) > 2) changed = true;
             
             static uint32_t print_counter = 0;
             print_counter++;
@@ -163,6 +167,18 @@ extern "C" [[noreturn]] void _start(void)
                 a_buf[i++] = ' '; a_buf[i++] = 'R'; a_buf[i++] = '2'; a_buf[i++] = ':';
                 a_buf[i++] = hex[(gp->right_trigger >> 4) & 0xF];
                 a_buf[i++] = hex[gp->right_trigger & 0xF];
+                
+                // Trackpad
+                a_buf[i++] = ' '; a_buf[i++] = 'T'; a_buf[i++] = 'P'; a_buf[i++] = ':';
+                a_buf[i++] = gp->touchpad_touching_1 ? '1' : '0';
+                a_buf[i++] = ' '; a_buf[i++] = 'T'; a_buf[i++] = 'X'; a_buf[i++] = ':';
+                a_buf[i++] = hex[(gp->touchpad_x_1 >> 8) & 0xF];
+                a_buf[i++] = hex[(gp->touchpad_x_1 >> 4) & 0xF];
+                a_buf[i++] = hex[gp->touchpad_x_1 & 0xF];
+                a_buf[i++] = ' '; a_buf[i++] = 'T'; a_buf[i++] = 'Y'; a_buf[i++] = ':';
+                a_buf[i++] = hex[(gp->touchpad_y_1 >> 8) & 0xF];
+                a_buf[i++] = hex[(gp->touchpad_y_1 >> 4) & 0xF];
+                a_buf[i++] = hex[gp->touchpad_y_1 & 0xF];
                 a_buf[i++] = '\0';
                 
                 g_vga->write(a_buf);

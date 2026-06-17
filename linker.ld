@@ -18,7 +18,7 @@
 
 
 OUTPUT_FORMAT(elf64-x86-64)
-ENTRY(_start)
+ENTRY(kernel_main)
 
 SECTIONS
 {

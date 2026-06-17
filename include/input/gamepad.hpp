@@ -44,6 +44,17 @@ struct GamepadState {
     // Analog Triggers (0 to 255)
     uint8_t left_trigger;
     uint8_t right_trigger;
+    
+    // Touchpad
+    bool btn_touchpad;
+    
+    bool touchpad_touching_1;
+    uint16_t touchpad_x_1;
+    uint16_t touchpad_y_1;
+    
+    bool touchpad_touching_2;
+    uint16_t touchpad_x_2;
+    uint16_t touchpad_y_2;
 };
 
 class GamepadDriver {
