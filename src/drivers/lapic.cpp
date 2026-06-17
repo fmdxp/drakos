@@ -50,6 +50,12 @@ const char* LocalAPIC::get_name() const {
     return "Local APIC";
 }
 
+void lapic_eoi() {
+    if (g_lapic) {
+        g_lapic->eoi();
+    }
+}
+
 void LocalAPIC::eoi() {
     // Writing any value to the EOI register acknowledges the interrupt
     write(LAPIC_EOI, 0);

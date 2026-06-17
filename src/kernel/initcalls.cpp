@@ -34,6 +34,9 @@ extern initcall_t __initcalls_3_drv_end[];
 extern initcall_t __initcalls_4_dev_start[];
 extern initcall_t __initcalls_4_dev_end[];
 
+extern initcall_t __initcalls_5_usb_start[];
+extern initcall_t __initcalls_5_usb_end[];
+
 static void execute_initcalls(initcall_t* start, initcall_t* end) {
     for (initcall_t* call = start; call < end; call++) {
         bool success = (*call)();
@@ -51,4 +54,5 @@ void system_init_modules() {
     execute_initcalls(__initcalls_2_mem_c_start, __initcalls_2_mem_c_end);
     execute_initcalls(__initcalls_3_drv_start, __initcalls_3_drv_end);
     execute_initcalls(__initcalls_4_dev_start, __initcalls_4_dev_end);
+    execute_initcalls(__initcalls_5_usb_start, __initcalls_5_usb_end);
 }

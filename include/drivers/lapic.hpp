@@ -60,3 +60,6 @@ private:
 };
 
 extern LocalAPIC* g_lapic;
+
+// Global helper to send End of Interrupt
+void lapic_eoi();
