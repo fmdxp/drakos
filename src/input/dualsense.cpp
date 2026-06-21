@@ -23,6 +23,11 @@ DualSenseDriver::DualSenseDriver(uint32_t slot_id, uint8_t ep_num, uint16_t max_
 
     if (g_vga) g_vga->write("DualSense: Driver initialized, listening for input...\n");
 
+    // Assign the global pointer EARLY! 
+    // Otherwise, the xHCI interrupt for the first read might fire while we are 
+    // blocked in set_led(), and it will see a null pointer and drop the stream!
+    g_dualsense_driver = this;
+
     // Submit first read
     prime_interrupt();
     

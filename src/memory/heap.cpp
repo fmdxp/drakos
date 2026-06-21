@@ -52,7 +52,7 @@ static SlubCache s_caches[NUM_SLUB_CACHES];
 // A simple way is to prepend a small header to large allocations.
 struct LargeAllocHeader {
     size_t num_pages;
-    // Data follows immediately after
+    uint8_t padding[56]; // Make the header exactly 64 bytes to guarantee 64-byte payload alignment
 };
 
 // -------------------------------------------------------------------
@@ -175,17 +175,26 @@ void kfree(void* ptr) {
 // -------------------------------------------------------------------
 // C++ OPERATORS
 // -------------------------------------------------------------------
+namespace std {
+    enum class align_val_t : size_t {};
+}
 
+// C++ OPERATORS
 // Note: These override the placement new ones in module.hpp if called
-// with a size.
 void* operator new(size_t size) { return kmalloc(size); }
 void* operator new[](size_t size) { return kmalloc(size); }
-
 void operator delete(void* p) noexcept { kfree(p); }
 void operator delete[](void* p) noexcept { kfree(p); }
+
 // Unsized deletes (required by C++14+)
 void operator delete(void* p, size_t) noexcept { kfree(p); }
 void operator delete[](void* p, size_t) noexcept { kfree(p); }
+
+// Aligned allocations (required by C++17+ for over-aligned types like Thread/fpu_state)
+void* operator new(size_t size, std::align_val_t al) { (void)al; return kmalloc(size); }
+void* operator new[](size_t size, std::align_val_t al) { (void)al; return kmalloc(size); }
+void operator delete(void* p, std::align_val_t) noexcept { kfree(p); }
+void operator delete[](void* p, std::align_val_t) noexcept { kfree(p); }
 
 // -------------------------------------------------------------------
 // MODULE LIFECYCLE

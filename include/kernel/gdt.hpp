@@ -38,16 +38,40 @@ struct GDTPointer {
     uint64_t base;
 } __attribute__((packed));
 
+// TSS Entry structure (104 bytes in 64-bit mode)
+struct TSSEntry {
+    uint32_t reserved0;
+    uint64_t rsp0;
+    uint64_t rsp1;
+    uint64_t rsp2;
+    uint64_t reserved1;
+    uint64_t ist1;
+    uint64_t ist2;
+    uint64_t ist3;
+    uint64_t ist4;
+    uint64_t ist5;
+    uint64_t ist6;
+    uint64_t ist7;
+    uint64_t reserved2;
+    uint16_t reserved3;
+    uint16_t iopb_offset;
+} __attribute__((packed));
+
 class GDT : public KernelModule {
 public:
     bool start() override;
     void stop() override;
     const char* get_name() const override;
+    
+    // Updates RSP0 in the TSS for the current thread
+    void set_kernel_stack(uintptr_t stack);
 
 private:
     void set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags);
+    void set_tss(int index, uintptr_t base, uint32_t limit);
     
-    // We need 5 entries: Null, Kernel Code, Kernel Data, User Data, User Code
-    GDTEntry entries[5];
+    // We need 7 entries: Null, KCode, KData, UData, UCode, TSS (2 entries)
+    GDTEntry entries[7];
     GDTPointer pointer;
+    TSSEntry tss;
 };

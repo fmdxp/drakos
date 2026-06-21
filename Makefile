@@ -32,10 +32,13 @@ ISO			= drakos.iso
 BUILD 		= build
 
 
-SRCS = $(shell find src -name "*.cpp")
-OBJS = $(patsubst %.cpp, $(BUILD)/%.o, $(notdir $(SRCS)))
+SRCS_CPP = $(shell find src -name "*.cpp")
+SRCS_ASM = $(shell find src -name "*.S")
+OBJS = $(patsubst %.cpp, $(BUILD)/%.o, $(notdir $(SRCS_CPP))) \
+       $(patsubst %.S, $(BUILD)/%.o, $(notdir $(SRCS_ASM)))
 FONT_OBJ = $(BUILD)/font.o
-vpath %.cpp $(sort $(dir $(SRCS)))
+vpath %.cpp $(sort $(dir $(SRCS_CPP)))
+vpath %.S $(sort $(dir $(SRCS_ASM)))
 
 
 
@@ -71,6 +74,10 @@ $(BUILD)/%.o: %.cpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+$(BUILD)/%.o: %.S
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 
 $(BUILD)/font.o: src/fonts/Lat2-Terminus16.psf
 	@mkdir -p $(BUILD)
@@ -96,4 +103,7 @@ clean:
 
 
 run: $(ISO)
-	qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 -device usb-kbd,bus=xhci.0
+	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 -device usb-kbd,bus=xhci.0
+
+debug: $(ISO)
+	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 -device usb-kbd,bus=xhci.0 -s -S

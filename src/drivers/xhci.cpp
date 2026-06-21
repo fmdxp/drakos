@@ -693,8 +693,7 @@ void XHCI::handle_interrupt() {
     lapic_eoi();
 }
 
-extern "C" __attribute__((interrupt)) void xhci_isr(InterruptFrame* frame) {
-    (void)frame;
+extern "C" void xhci_handle_interrupt() {
     if (g_xhci) {
         g_xhci->handle_interrupt();
     }

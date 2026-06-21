@@ -20,6 +20,7 @@
 #include "ioapic.hpp"
 #include "acpi.hpp"
 #include "pmm.hpp"
+#include "vmm.hpp"
 
 // Utility functions for x86 in/out instructions
 static inline void outb(uint16_t port, uint8_t val) {
@@ -39,6 +40,7 @@ bool IOAPIC::start() {
 
     // Access via HHDM
     m_ioapic_virt = g_acpi->get_ioapic_phys() + pmm_hhdm_offset();
+    vmm_map(m_ioapic_virt & ~0xFFFULL, g_acpi->get_ioapic_phys() & ~0xFFFULL, VMM_MMIO);
 
     // Disable the legacy 8259 PIC
     disable_legacy_pic();

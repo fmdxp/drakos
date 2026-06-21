@@ -48,25 +48,28 @@ bool GDT::start() {
     set_entry(0, 0, 0, 0, 0);
 
     // 1: Kernel Code Segment (CS=0x08)
-    // Access: Present(1) | Privilege(00) | Descriptor(1) | Executable(1) | Conforming(0) | Readable(1) | Accessed(0) = 0x9A
-    // Flags: Granularity(1) | Size(0 - 64bit uses L) | LongMode(1) | Available(0) = 0xA0
     set_entry(1, 0, 0xFFFFF, 0x9A, 0xA0);
 
     // 2: Kernel Data Segment (DS=0x10)
-    // Access: Present(1) | Privilege(00) | Descriptor(1) | Executable(0) | Direction(0) | Writable(1) | Accessed(0) = 0x92
-    // Flags: Granularity(1) | Size(1) | LongMode(0) | Available(0) = 0xC0
     set_entry(2, 0, 0xFFFFF, 0x92, 0xC0);
 
     // 3: User Data Segment (DS=0x18 - typically placed before User Code for SYSRET)
-    // Access: Present(1) | Privilege(11) | Descriptor(1) | Executable(0) | Direction(0) | Writable(1) | Accessed(0) = 0xF2
     set_entry(3, 0, 0xFFFFF, 0xF2, 0xC0);
 
     // 4: User Code Segment (CS=0x20)
-    // Access: Present(1) | Privilege(11) | Descriptor(1) | Executable(1) | Conforming(0) | Readable(1) | Accessed(0) = 0xFA
     set_entry(4, 0, 0xFFFFF, 0xFA, 0xA0);
+    
+    // Clear TSS
+    for (int i = 0; i < sizeof(TSSEntry); i++) {
+        ((uint8_t*)&tss)[i] = 0;
+    }
+    tss.iopb_offset = sizeof(TSSEntry); // No IOPB
+    
+    // 5 & 6: TSS Segment (CS=0x28)
+    set_tss(5, (uintptr_t)&tss, sizeof(TSSEntry) - 1);
 
     // Setup pointer
-    pointer.limit = (sizeof(GDTEntry) * 5) - 1;
+    pointer.limit = (sizeof(GDTEntry) * 7) - 1;
     pointer.base = (uint64_t)&entries;
 
     // Load GDT
@@ -74,6 +77,9 @@ bool GDT::start() {
 
     // Reload segment registers with the new GDT selectors
     reload_segments();
+    
+    // Load TSS (Selector 0x28, which is index 5 * 8)
+    asm volatile("ltr %0" : : "r"((uint16_t)0x28));
 
     return true;
 }
@@ -86,6 +92,10 @@ const char* GDT::get_name() const {
     return "Global Descriptor Table (GDT)";
 }
 
+void GDT::set_kernel_stack(uintptr_t stack) {
+    tss.rsp0 = stack;
+}
+
 void GDT::set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags) {
     entries[index].base_low = (base & 0xFFFF);
     entries[index].base_middle = (base >> 16) & 0xFF;
@@ -94,6 +104,19 @@ void GDT::set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, ui
     entries[index].limit_low = (limit & 0xFFFF);
     entries[index].flags = ((limit >> 16) & 0x0F) | (flags & 0xF0);
     entries[index].access = access;
+}
+
+void GDT::set_tss(int index, uintptr_t base, uint32_t limit) {
+    set_entry(index, base, limit, 0x89, 0x00); // Access 0x89: Present, TSS Available
+    
+    // In 64-bit mode, the TSS descriptor is 16 bytes (2 consecutive GDT entries)
+    // The second entry contains the upper 32 bits of the base address.
+    entries[index + 1].limit_low = (base >> 32) & 0xFFFF;
+    entries[index + 1].base_low = (base >> 48) & 0xFFFF;
+    entries[index + 1].base_middle = 0;
+    entries[index + 1].access = 0;
+    entries[index + 1].flags = 0;
+    entries[index + 1].base_high = 0;
 }
 
 // Register as Core Module

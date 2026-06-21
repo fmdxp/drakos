@@ -1,0 +1,127 @@
+/*
+ * drakos - An x64 UEFI gaming OS inspired by the architecture and user experience of modern consoles.
+ * Copyright (C) 2026 fmdxp
+ * 
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+
+#include "thread.hpp"
+#include <stddef.h>
+
+// Global pointer to the currently executing thread
+static Thread* s_current_thread = nullptr;
+
+Process::Process() {
+    static uint64_t next_pid = 1;
+    pid = next_pid++;
+    page_table_phys = 0;
+}
+
+Process::~Process() {
+}
+
+Thread::Thread(Process* parent, void (*entry_point)(), bool is_user) {
+    static uint64_t next_tid = 1;
+    tid = next_tid++;
+    parent_process = parent;
+    state = 0; // Ready
+    
+    // Allocate a 16KB kernel stack
+    uint8_t* stack = new uint8_t[16384];
+    
+    // The top of the stack (stack grows downwards)
+    uint64_t stack_top = (uint64_t)stack + 16384;
+    
+    // Reserve space for the Context structure at the top of the stack
+    kernel_stack = stack_top - sizeof(Context);
+    context = reinterpret_cast<Context*>(kernel_stack);
+    
+    // Zero out the Context
+    uint8_t* ctx_ptr = reinterpret_cast<uint8_t*>(context);
+    for (size_t i = 0; i < sizeof(Context); i++) ctx_ptr[i] = 0;
+    
+    // Initialize FPU state to 0
+    for (size_t i = 0; i < 4096; i++) fpu_state[i] = 0;
+    
+    // Initialize the Interrupt Frame for IRETQ
+    if (is_user) {
+        context->cs = 0x20 | 3; // USER_CS with RPL 3
+        context->ss = 0x18 | 3; // USER_SS with RPL 3
+        context->rflags = 0x202; // IF (Interrupts enabled)
+        context->rsp = 0; // To be set when allocating User Virtual Memory
+    } else {
+        context->cs = 0x08; // KERNEL_CS
+        context->ss = 0x10; // KERNEL_SS
+        context->rflags = 0x202; // IF (Interrupts enabled)
+        // For kernel threads, RSP points to just above the Context struct on the stack
+        context->rsp = stack_top;
+    }
+    
+    context->rip = (uint64_t)entry_point;
+    
+    // By default, a thread points to itself in the circular list
+    next = this;
+}
+
+Thread::~Thread() {
+    // In a real OS we would delete the kernel stack here
+}
+
+void scheduler_init() {
+    // We create a dummy "Idle/Boot" thread to represent the currently executing kernel code
+    Process* kernel_proc = new Process();
+    Thread* boot_thread = new Thread(kernel_proc, nullptr, false);
+    
+    s_current_thread = boot_thread;
+}
+
+void scheduler_add_thread(Thread* thread) {
+    if (!s_current_thread) {
+        s_current_thread = thread;
+    } else {
+        // Insert into the circular linked list
+        Thread* next_node = s_current_thread->next;
+        s_current_thread->next = thread;
+        thread->next = next_node;
+    }
+}
+
+// Low-level XSAVE / XRSTOR wrappers
+static inline void arch_save_fpu(void* buffer) {
+    asm volatile("xsave64 %0" : "=m"(*(uint8_t*)buffer) : "a"(0xFFFFFFFF), "d"(0xFFFFFFFF) : "memory");
+}
+
+static inline void arch_restore_fpu(void* buffer) {
+    asm volatile("xrstor64 %0" : : "m"(*(uint8_t*)buffer), "a"(0xFFFFFFFF), "d"(0xFFFFFFFF) : "memory");
+}
+
+extern "C" Context* scheduler_switch(Context* current_context) {
+    if (!s_current_thread) return current_context;
+    
+    // 1. Save state of the current thread
+    s_current_thread->context = current_context;
+    arch_save_fpu(s_current_thread->fpu_state);
+    
+    // 2. Pick the next thread in the Round-Robin queue
+    s_current_thread = s_current_thread->next;
+    
+    // 3. Restore state of the new thread
+    arch_restore_fpu(s_current_thread->fpu_state);
+    
+    // TODO: Switch Page Table (PML4) if parent_process changed!
+    // TODO: Update TSS (Task State Segment) RSP0 so Ring 3 interrupts land on the new Kernel Stack
+    
+    return s_current_thread->context;
+}

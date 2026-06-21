@@ -88,7 +88,7 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
             uint32_t new_header = (cap_header & 0x0000FFFF) | ((uint32_t)msg_ctrl << 16);
             write(bus, device, func, cap_ptr, new_header);
             
-            // if (g_vga) g_vga->write("    -> MSI Configured!\n");
+            if (g_vga) g_vga->write("    -> MSI Configured!\n");
             return true;
         } else if (cap_id == 0x11) { // MSI-X Capability
             uint16_t msg_ctrl = (cap_header >> 16) & 0xFFFF;
@@ -129,7 +129,7 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
             uint32_t new_header = (cap_header & 0x0000FFFF) | ((uint32_t)msg_ctrl << 16);
             write(bus, device, func, cap_ptr, new_header);
             
-            // if (g_vga) g_vga->write("    -> MSI-X Configured!\n");
+            if (g_vga) g_vga->write("    -> MSI-X Configured!\n");
             return true;
         }
         
