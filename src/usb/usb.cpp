@@ -13,7 +13,7 @@ static char hex_digit(uint8_t v) {
 }
 
 bool USBManager::start() {
-    if (g_vga) g_vga->write("USB: Manager Initialized.\n");
+    // TEMPORARY: Disable USB Manager to test multithreading
     return true;
 }
 

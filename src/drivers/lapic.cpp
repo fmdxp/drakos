@@ -20,6 +20,7 @@
 #include "lapic.hpp"
 #include "acpi.hpp"
 #include "pmm.hpp" // For HHDM offset
+#include "vmm.hpp" // For VMM_MMIO
 
 bool LocalAPIC::start() {
     // We depend on ACPI to find the physical address
@@ -29,11 +30,23 @@ bool LocalAPIC::start() {
 
     // Access via Higher Half Direct Map (HHDM)
     m_lapic_virt = g_acpi->get_lapic_phys() + pmm_hhdm_offset();
+    
+    // CRITICAL: Force VMM_MMIO (Cache Disable) on the LAPIC page! 
+    // Otherwise CPU caches writes to SVR and the APIC never enables.
+    vmm_map(m_lapic_virt & ~0xFFFULL, g_acpi->get_lapic_phys() & ~0xFFFULL, VMM_MMIO);
 
     // Enable the Local APIC by setting the 8th bit in the Spurious Interrupt Vector Register
     // We also map the spurious interrupt to vector 0xFF.
     uint32_t svr = read(LAPIC_SVR);
     write(LAPIC_SVR, svr | 0x100 | 0xFF);
+
+    // --- APIC Timer Initialization ---
+    // Divider 16
+    write(LAPIC_TMRDIV, 0x03);
+    // Timer vector 32, Periodic mode (bit 17)
+    write(LAPIC_LVT_TMR, 32 | 0x20000);
+    // Initial count (arbitrary delay for now, typically calibrated via PIT/ACPI)
+    write(LAPIC_TMRINITCNT, 1000000);
 
     return true;
 }
@@ -41,6 +54,7 @@ bool LocalAPIC::start() {
 void LocalAPIC::stop() {
     // Disable APIC (clear 8th bit of SVR)
     if (m_lapic_virt) {
+        write(LAPIC_LVT_TMR, 0x10000); // Mask timer
         uint32_t svr = read(LAPIC_SVR);
         write(LAPIC_SVR, svr & ~0x100);
     }

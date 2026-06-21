@@ -18,6 +18,8 @@
 
 
 #include "vga.hpp"
+#include "font.hpp"
+#include "serial.hpp"
 #include "limine_requests.hpp"
 
 // We create a static BitmapFont structure

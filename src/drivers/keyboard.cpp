@@ -114,9 +114,7 @@ static const char scancode_map_shift[128] = {
 static bool s_shift_pressed = false;
 static bool s_caps_lock_active = false;
 
-extern "C" __attribute__((interrupt)) void keyboard_isr(InterruptFrame* frame) {
-    (void)frame;
-
+extern "C" void keyboard_isr() {
     // Read the scancode from PS/2 data port
     uint8_t scancode = inb(0x60);
 

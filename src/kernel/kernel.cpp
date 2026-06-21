@@ -60,10 +60,117 @@ volatile struct limine_rsdp_request g_rsdp_request =
     .response = nullptr
 };
 
+#include <cpuid.h>
+
+// Enable AVX/AVX512 and XSAVE support dynamically based on CPUID
+static void enable_fpu_and_avx() {
+    uint32_t eax, ebx, ecx, edx;
+    
+    // Check XSAVE support (CPUID.1:ECX.XSAVE[bit 26])
+    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) && (ecx & (1 << 26))) {
+        uint64_t cr4;
+        asm volatile("mov %%cr4, %0" : "=r"(cr4));
+        cr4 |= (1 << 9);  // OSFXSR (SSE support)
+        cr4 |= (1 << 10); // OSXMMEXCPT (SSE exceptions)
+        cr4 |= (1 << 18); // OSXSAVE (XSAVE support)
+        asm volatile("mov %0, %%cr4" : : "r"(cr4));
+
+        // Base XCR0: x87 (bit 0) and SSE (bit 1)
+        uint64_t xcr0 = 1 | (1 << 1);
+
+        // Check AVX support (CPUID.1:ECX.AVX[bit 28])
+        if (ecx & (1 << 28)) {
+            xcr0 |= (1 << 2); // Enable AVX in XCR0
+        }
+
+        // Check AVX512F support (CPUID.7.0:EBX.AVX512F[bit 16])
+        if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) && (ebx & (1 << 16))) {
+            xcr0 |= (1 << 5) | (1 << 6) | (1 << 7); // Opmask, ZMM_Hi256, Hi16_ZMM
+        }
+
+        uint32_t xcr0_low = xcr0 & 0xFFFFFFFF;
+        uint32_t xcr0_high = xcr0 >> 32;
+        asm volatile("xsetbv" : : "a"(xcr0_low), "d"(xcr0_high), "c"(0));
+    } else {
+        // Fallback for very old CPUs: Just enable standard SSE
+        uint64_t cr4;
+        asm volatile("mov %%cr4, %0" : "=r"(cr4));
+        cr4 |= (1 << 9);  // OSFXSR
+        cr4 |= (1 << 10); // OSXMMEXCPT
+        asm volatile("mov %0, %%cr4" : : "r"(cr4));
+    }
+}
+
+// Write to MSR
+static void wrmsr(uint32_t msr, uint64_t val) {
+    uint32_t low = val & 0xFFFFFFFF;
+    uint32_t high = val >> 32;
+    asm volatile("wrmsr" : : "c"(msr), "a"(low), "d"(high));
+}
+
+// Read from MSR
+static uint64_t rdmsr(uint32_t msr) {
+    uint32_t low, high;
+    asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
+    return ((uint64_t)high << 32) | low;
+}
+
+extern "C" void syscall_entry();
+
+static void enable_syscalls() {
+    uint64_t efer = rdmsr(0xC0000080);
+    efer |= 1;
+    wrmsr(0xC0000080, efer);
+
+    uint64_t star = ((uint64_t)0x10 << 48) | ((uint64_t)0x08 << 32);
+    wrmsr(0xC0000081, star);
+    wrmsr(0xC0000082, (uint64_t)syscall_entry);
+    wrmsr(0xC0000084, 0x200); 
+}
+
+extern "C" void syscall_handler(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6, uint64_t sys_num) {
+    (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5; (void)arg6;
+    if (sys_num == 0) {
+        // dummy debug syscall
+    }
+}
+
+#include "thread.hpp"
+
+extern "C" void thread_a() {
+    while (1) {
+        g_vga->write("A");
+        for (volatile int i = 0; i < 10000000; i++);
+    }
+}
+
+extern "C" void thread_b() {
+    while (1) {
+        g_vga->write("B");
+        for (volatile int i = 0; i < 10000000; i++);
+    }
+}
+
 extern "C" [[noreturn]] void kernel_main(void)
 {
-    // Execute all registered modules in order
+    // 1. Initialize base hardware and VGA, so we can see output
     system_init_modules();
+    
+    // 2. Enable MSR Syscalls
+    enable_syscalls();
+
+    // 3. Enable XSAVE and AVX only AFTER checking CPUID
+    enable_fpu_and_avx();
+    
+    // 4. Initialize Scheduler and create test threads
+    scheduler_init();
+    
+    Process* p = new Process();
+    Thread* ta = new Thread(p, thread_a, false);
+    Thread* tb = new Thread(p, thread_b, false);
+    
+    scheduler_add_thread(ta);
+    scheduler_add_thread(tb);
 
     // If framebuffer is not available, halt
     if (g_framebuffer_request.response == NULL || g_framebuffer_request.response->framebuffer_count < 1)
