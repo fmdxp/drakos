@@ -20,8 +20,16 @@
 #include "thread.hpp"
 #include <stddef.h>
 
-// Global pointer to the currently executing thread
-static Thread* s_current_thread = nullptr;
+// Global pointers
+static Thread* s_current_thread     = nullptr;
+static Thread* s_idle_thread        = nullptr;
+static Thread* s_last_normal_thread = nullptr;
+
+
+static void idle_main() {
+    while (1) asm volatile("hlt");
+}
+
 
 Process::Process() {
     static uint64_t next_pid = 1;
@@ -32,11 +40,11 @@ Process::Process() {
 Process::~Process() {
 }
 
-Thread::Thread(Process* parent, void (*entry_point)(), bool is_user) {
+Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, char* thread_name) {
     static uint64_t next_tid = 1;
     tid = next_tid++;
     parent_process = parent;
-    state = 0; // Ready
+    state = THREAD_READY; // Ready
     
     // Allocate a 16KB kernel stack
     uint8_t* stack = new uint8_t[16384];
@@ -82,9 +90,11 @@ Thread::~Thread() {
 void scheduler_init() {
     // We create a dummy "Idle/Boot" thread to represent the currently executing kernel code
     Process* kernel_proc = new Process();
-    Thread* boot_thread = new Thread(kernel_proc, nullptr, false);
+    Thread* boot_thread = new Thread(kernel_proc, nullptr, false, (char*)"core");
     
     s_current_thread = boot_thread;
+    s_last_normal_thread = boot_thread;
+    s_idle_thread = new Thread(kernel_proc, idle_main, false, (char*)"idle");
 }
 
 void scheduler_add_thread(Thread* thread) {
@@ -114,14 +124,64 @@ extern "C" Context* scheduler_switch(Context* current_context) {
     s_current_thread->context = current_context;
     arch_save_fpu(s_current_thread->fpu_state);
     
+    if (s_current_thread->state == THREAD_RUNNING)
+        s_current_thread->state = THREAD_READY;
+
+
+    Thread* start_thread;
+    if (s_current_thread == s_idle_thread) start_thread = s_last_normal_thread;
+    else start_thread = s_current_thread;
+    if (!start_thread) start_thread = s_current_thread;
+
+
     // 2. Pick the next thread in the Round-Robin queue
-    s_current_thread = s_current_thread->next;
+    Thread* next_thread = start_thread->next;
+    bool found = false;
+
+    while (next_thread != start_thread)
+    {
+        if (next_thread->state == THREAD_READY) {
+            found = true;
+            break;
+        }
+        next_thread = next_thread->next;
+    }
     
-    // 3. Restore state of the new thread
+    if (!found && start_thread->state == THREAD_READY){
+        next_thread = start_thread;
+        found = true;
+    }
+
+    if (found) {
+        s_current_thread = next_thread;
+        s_last_normal_thread = s_current_thread;
+    }
+
+    else s_current_thread = s_idle_thread;
+    
+
+    s_current_thread->state = THREAD_RUNNING;
     arch_restore_fpu(s_current_thread->fpu_state);
     
     // TODO: Switch Page Table (PML4) if parent_process changed!
     // TODO: Update TSS (Task State Segment) RSP0 so Ring 3 interrupts land on the new Kernel Stack
     
     return s_current_thread->context;
+}
+
+void scheduler_yield() {
+    asm volatile("int $32");   // Interrupt 32 -> Triggers timer
+}
+
+void scheduler_block_current_thread() {
+    s_current_thread->state = THREAD_BLOCKED;
+    scheduler_yield();
+}
+
+void scheduler_wake_thread(Thread* t) {
+    if (t) t->state = THREAD_READY;
+}
+
+Thread* scheduler_get_current_thread() {
+    return s_current_thread;
 }

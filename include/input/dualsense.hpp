@@ -31,7 +31,7 @@ private:
     uintptr_t m_report_buf_phys;
     uint8_t*  m_report_buf_virt;
     
-    void parse_report(const uint8_t* report);
+    bool parse_report(const uint8_t* report);
 };
 
 extern DualSenseDriver* g_dualsense_driver;

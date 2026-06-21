@@ -60,6 +60,7 @@ public:
     bool start() override;
     void stop() override;
     const char* get_name() const override;
+    bool has_pending_tasks();
 
     // Called by XHCI ISR: records pending device, returns IMMEDIATELY (no heavy work)
     void register_device(uint8_t slot_id, XHCI* xhci_controller);

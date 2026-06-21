@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <cpuid.h>
 
 #include "limine.h"
 #include "module.hpp"
@@ -28,6 +29,8 @@
 #include "serial.hpp"
 #include "usb/usb.hpp"
 #include "input/gamepad.hpp"
+#include "thread.hpp"
+
 
 volatile struct limine_framebuffer_request g_framebuffer_request =
 {
@@ -59,8 +62,6 @@ volatile struct limine_rsdp_request g_rsdp_request =
     .revision = 0,
     .response = nullptr
 };
-
-#include <cpuid.h>
 
 // Enable AVX/AVX512 and XSAVE support dynamically based on CPUID
 static void enable_fpu_and_avx() {
@@ -135,21 +136,19 @@ extern "C" void syscall_handler(uint64_t arg1, uint64_t arg2, uint64_t arg3, uin
     }
 }
 
-#include "thread.hpp"
 
-extern "C" void thread_a() {
+void usb_thread_main() {
     while (1) {
-        g_vga->write("A");
-        for (volatile int i = 0; i < 10000000; i++);
+        if (g_usb_manager && g_usb_manager->has_pending_tasks()) {    // has_pending_tasks is non-existent
+            g_usb_manager->update();
+        } else {
+            scheduler_block_current_thread();
+        }
     }
 }
 
-extern "C" void thread_b() {
-    while (1) {
-        g_vga->write("B");
-        for (volatile int i = 0; i < 10000000; i++);
-    }
-}
+Thread* g_usb_thread = nullptr;
+Thread* g_kernel_thread = nullptr;
 
 extern "C" [[noreturn]] void kernel_main(void)
 {
@@ -165,12 +164,12 @@ extern "C" [[noreturn]] void kernel_main(void)
     // 4. Initialize Scheduler and create test threads
     scheduler_init();
     
-    Process* p = new Process();
-    Thread* ta = new Thread(p, thread_a, false);
-    Thread* tb = new Thread(p, thread_b, false);
-    
-    scheduler_add_thread(ta);
-    scheduler_add_thread(tb);
+    Process* usb_proc = new Process();
+    g_usb_thread = new Thread(usb_proc, usb_thread_main, false, "USB Controller");
+    scheduler_add_thread(g_usb_thread);
+
+    g_kernel_thread = scheduler_get_current_thread();
+
 
     // If framebuffer is not available, halt
     if (g_framebuffer_request.response == NULL || g_framebuffer_request.response->framebuffer_count < 1)
@@ -186,7 +185,6 @@ extern "C" [[noreturn]] void kernel_main(void)
     // and poll gamepad input. Runs with interrupts enabled (sti from GDT init).
     while (1) {
         // Process any USB devices that were registered during an interrupt
-        if (g_usb_manager) g_usb_manager->update();
         
         // Print gamepad state changes
         static Input::GamepadState last_gp_state = {0};
@@ -300,6 +298,6 @@ extern "C" [[noreturn]] void kernel_main(void)
             }
         }
         
-        asm volatile("hlt"); // Sleep until next interrupt
+        scheduler_block_current_thread();
     }
 }

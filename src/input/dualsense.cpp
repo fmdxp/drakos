@@ -4,6 +4,7 @@
 #include "pmm.hpp"
 #include "vmm.hpp"
 #include "vga.hpp"
+#include "thread.hpp"
 
 DualSenseDriver* g_dualsense_driver = nullptr;
 
@@ -60,30 +61,30 @@ void DualSenseDriver::on_report_received() {
     }
 
     // Called by xHCI ISR when TRB_EVENT_TRANSFER fires for this slot
-    parse_report(m_report_buf_virt);
+    bool changed = parse_report(m_report_buf_virt);
+
+    // SVEGLIA IL KERNEL THREAD (SOLO SE C'E' UN CAMBIAMENTO REALE!)
+    // I controller moderni spammano pacchetti a 500Hz per via del "rumore" analogico
+    // delle levette. Filtriamo questi micro-movimenti per mantenere la CPU in idle!
+    if (changed) {
+        extern Thread* g_kernel_thread;
+        if (g_kernel_thread) {
+            extern void scheduler_wake_thread(Thread* t);
+            scheduler_wake_thread(g_kernel_thread);
+        }
+    }
 
     // Re-submit buffer to keep the stream going
     prime_interrupt();
 }
 
-void DualSenseDriver::parse_report(const uint8_t* r) {
-    // DualSense USB HID Report format (Report ID 0x01):
-    // Byte 0:   Report ID (0x01)
-    // Byte 1:   Left Stick X
-    // Byte 2:   Left Stick Y
-    // Byte 3:   Right Stick X
-    // Byte 4:   Right Stick Y
-    // Byte 5:   L2 Trigger (Analog)
-    // Byte 6:   R2 Trigger (Analog)
-    // Byte 7:   Sequence Number
-    // Byte 8:   D-pad (nibble) + face buttons (nibble)
-    // Byte 9:   L1/R1, Share, Options, L3, R3
-    // Byte 10:  PS Button, Touchpad Click
-
-    if (r[0] != 0x01) return; // Ignore non-standard reports
+bool DualSenseDriver::parse_report(const uint8_t* r) {
+    if (r[0] != 0x01) return false;
 
     Input::GamepadState* state = Input::GamepadManager::get_gamepad(m_gamepad_index);
-    if (!state) return;
+    if (!state) return false;
+
+    Input::GamepadState old_state = *state;
 
     // Analog sticks
     state->left_stick_x  = r[1];
@@ -91,41 +92,35 @@ void DualSenseDriver::parse_report(const uint8_t* r) {
     state->right_stick_x = r[3];
     state->right_stick_y = r[4];
 
-    // Triggers (analog)
+    // Triggers
     state->left_trigger  = r[5];
     state->right_trigger = r[6];
 
-    // D-Pad (lower nibble of byte 8)
+    // D-Pad
     uint8_t dpad = r[8] & 0x0F;
     state->dpad_up    = (dpad == 0 || dpad == 1 || dpad == 7);
     state->dpad_right = (dpad == 1 || dpad == 2 || dpad == 3);
     state->dpad_down  = (dpad == 3 || dpad == 4 || dpad == 5);
     state->dpad_left  = (dpad == 5 || dpad == 6 || dpad == 7);
 
-    // Face buttons (upper nibble of byte 8)
-    state->btn_x = (r[8] >> 4) & 1; // Square
-    state->btn_a = (r[8] >> 5) & 1; // Cross
-    state->btn_b = (r[8] >> 6) & 1; // Circle
-    state->btn_y = (r[8] >> 7) & 1; // Triangle
+    // Face buttons
+    state->btn_x = (r[8] >> 4) & 1;
+    state->btn_a = (r[8] >> 5) & 1;
+    state->btn_b = (r[8] >> 6) & 1;
+    state->btn_y = (r[8] >> 7) & 1;
 
-    // Shoulder / System buttons (byte 9)
+    // Shoulder / System
     state->btn_l1      = (r[9] >> 0) & 1;
     state->btn_r1      = (r[9] >> 1) & 1;
-    state->btn_share   = (r[9] >> 4) & 1; // Create
+    state->btn_share   = (r[9] >> 4) & 1;
     state->btn_options = (r[9] >> 5) & 1;
     state->btn_l3      = (r[9] >> 6) & 1;
     state->btn_r3      = (r[9] >> 7) & 1;
 
-    // PS / Logo button, Touchpad Click (byte 10)
+    // PS / Logo / Touchpad Click
     state->btn_logo = (r[10] >> 0) & 1;
     state->btn_touchpad = (r[10] >> 1) & 1;
     
-    // Touchpad parsing
-    // Point 1 is at offset 33 (4 bytes)
-    // byte 0: contact status (bit 7: 0 = touching, 1 = not touching), id (bits 0-6)
-    // byte 1: X (lower 8 bits)
-    // byte 2: X (upper 4 bits in lower nibble), Y (lower 4 bits in upper nibble)
-    // byte 3: Y (upper 8 bits)
     uint32_t tp1 = 33;
     state->touchpad_touching_1 = ((r[tp1] & 0x80) == 0);
     if (state->touchpad_touching_1) {
@@ -133,13 +128,41 @@ void DualSenseDriver::parse_report(const uint8_t* r) {
         state->touchpad_y_1 = ((r[tp1 + 2] & 0xF0) >> 4) | (r[tp1 + 3] << 4);
     }
     
-    // Point 2 is at offset 37 (4 bytes)
     uint32_t tp2 = 37;
     state->touchpad_touching_2 = ((r[tp2] & 0x80) == 0);
     if (state->touchpad_touching_2) {
         state->touchpad_x_2 = r[tp2 + 1] | ((r[tp2 + 2] & 0x0F) << 8);
         state->touchpad_y_2 = ((r[tp2 + 2] & 0xF0) >> 4) | (r[tp2 + 3] << 4);
     }
+
+    bool changed = false;
+    
+    // Check digital buttons
+    if (state->btn_a != old_state.btn_a || state->btn_b != old_state.btn_b || 
+        state->btn_x != old_state.btn_x || state->btn_y != old_state.btn_y ||
+        state->dpad_up != old_state.dpad_up || state->dpad_down != old_state.dpad_down ||
+        state->dpad_left != old_state.dpad_left || state->dpad_right != old_state.dpad_right ||
+        state->btn_l1 != old_state.btn_l1 || state->btn_r1 != old_state.btn_r1 ||
+        state->btn_l3 != old_state.btn_l3 || state->btn_r3 != old_state.btn_r3 ||
+        state->btn_options != old_state.btn_options || state->btn_share != old_state.btn_share ||
+        state->btn_logo != old_state.btn_logo || state->btn_touchpad != old_state.btn_touchpad ||
+        state->touchpad_touching_1 != old_state.touchpad_touching_1 ||
+        state->touchpad_touching_2 != old_state.touchpad_touching_2) {
+        changed = true;
+    }
+    
+    // Check analog values (allow a jitter deadzone of +/- 2)
+    auto diff = [](uint8_t a, uint8_t b) { return a > b ? a - b : b - a; };
+    if (diff(state->left_trigger, old_state.left_trigger) > 2 ||
+        diff(state->right_trigger, old_state.right_trigger) > 2 ||
+        diff(state->left_stick_x, old_state.left_stick_x) > 2 ||
+        diff(state->left_stick_y, old_state.left_stick_y) > 2 ||
+        diff(state->right_stick_x, old_state.right_stick_x) > 2 ||
+        diff(state->right_stick_y, old_state.right_stick_y) > 2) {
+        changed = true;
+    }
+
+    return changed;
 }
 
 void DualSenseDriver::process_input() {

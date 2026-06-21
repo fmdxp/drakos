@@ -48,9 +48,20 @@ public:
     // TODO: Zircon-style Handle Table for Capabilities
 };
 
+
+typedef enum ThreadState {
+    THREAD_RUNNING,     // Thread is running
+    THREAD_READY,       // Thread is ready to be run
+    THREAD_BLOCKED,     // Thread is suspended, waiting for an external event
+    THREAD_SLEEPING,    // Thread is suspended, waiting for a specific time (es: sleep(1000);)
+    THREAD_DEAD,        // Thread is killed or ended its execution, and it's waiting to be freed up
+};
+
+
+
 class Thread {
 public:
-    Thread(Process* parent, void (*entry_point)(), bool is_user);
+    Thread(Process* parent, void (*entry_point)(), bool is_user, char* thread_name);
     ~Thread();
 
     // Thread ID
@@ -69,7 +80,7 @@ public:
     uint8_t fpu_state[FPU_STATE_SIZE] __attribute__((aligned(64)));
 
     // Thread state (e.g., Ready, Running, Blocked)
-    int state;
+    ThreadState state;
     
     // Simple Round-Robin scheduler link
     Thread* next;
@@ -79,3 +90,7 @@ public:
 void scheduler_init();
 void scheduler_add_thread(Thread* thread);
 extern "C" Context* scheduler_switch(Context* current_context);
+void scheduler_block_current_thread();
+void scheduler_wake_thread(Thread* t);
+void scheduler_yield();
+Thread* scheduler_get_current_thread();

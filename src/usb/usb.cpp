@@ -5,6 +5,9 @@
 #include "pmm.hpp"
 #include "vmm.hpp"
 #include "heap.hpp"
+#include "thread.hpp"
+
+extern "C" Thread* g_usb_thread;
 
 // Hex char helper
 static char hex_digit(uint8_t v) {
@@ -25,6 +28,8 @@ void USBManager::stop() {}
 
 // Called from ISR: ONLY saves slot info, returns immediately
 void USBManager::register_device(uint8_t slot_id, XHCI* xhci_controller) {
+    scheduler_wake_thread(g_usb_thread);
+
     if (g_vga) {
         g_vga->write("USB: New Device Registered with Slot ID: ");
         char buf[2];
@@ -33,7 +38,8 @@ void USBManager::register_device(uint8_t slot_id, XHCI* xhci_controller) {
         g_vga->write(buf);
         g_vga->write("\n");
     }
-    
+
+
     for (int i = 0; i < MAX_PENDING; i++) {
         if (!m_pending[i].valid) {
             m_pending[i].slot_id = slot_id;
@@ -171,5 +177,14 @@ void USBManager::enumerate_device(uint8_t slot_id, XHCI* xhci) {
         }
     }
 }
+
+
+bool USBManager::has_pending_tasks() {
+    for (int i = 0; i < MAX_PENDING; i++) {
+        if (m_pending[i].valid) return true;
+    }
+    return false;
+}
+
 
 REGISTER_MODULE(g_usb_manager, USBManager, 3_drv);
