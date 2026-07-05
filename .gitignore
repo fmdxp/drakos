@@ -5,7 +5,7 @@
 /.vscode
 /build
 /iso_root
-
+/stage_disk
 
 
 # Files

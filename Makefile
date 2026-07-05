@@ -31,6 +31,13 @@ KERNEL 		= iso_root/kernel.elf
 ISO			= drakos.iso
 BUILD 		= build
 
+USB_IMG		= usb_stick.img
+DISK_IMG	= disk.img
+STAGE_DIR 	= stage_disk
+
+USB_IMG_SIZE 	= 64M
+DISK_IMG_SIZE 	= 512M
+
 
 SRCS_CPP = $(shell find src -name "*.cpp")
 SRCS_ASM = $(shell find src -name "*.S")
@@ -66,10 +73,9 @@ CXXFLAGS = 	-std=c++20 -O2 -Wall -Wextra \
 LDFLAGS	=	-T linker.ld -nostdlib
 
 
-
 ## Targets ##
 
-.PHONY: all clean run
+.PHONY: all clean run debug images
 
 all: $(ISO)
 
@@ -101,11 +107,36 @@ $(ISO): $(KERNEL) limine.conf
 		iso_root -o $(ISO)
 
 
+images:
+	@if [ ! -f $(USB_IMG) ]; then \
+		echo "[drakos] Creating USB image..."; \
+		fallocate -l $(USB_IMG_SIZE) $(USB_IMG) || dd if=/dev/zero of=$(USB_IMG) bs=1M count=64; \
+		mkfs.fat -F 32 $(USB_IMG); \
+	else \
+		echo "[drakos] USB image already exists"; \
+	fi
+
+	@if [ ! -f $(DISK_IMG) ]; then \
+		echo "[drakos] Creating DISK image..."; \
+		fallocate -l $(DISK_IMG_SIZE) $(DISK_IMG) || dd if=/dev/zero of=$(DISK_IMG) bs=1M count=512; \
+		mkfs.fat -F 32 $(DISK_IMG); \
+	else \
+		echo "[drakos] DISK image already exists"; \
+	fi
+
+
+seed_disk: images
+	@rm -rf $(STAGE_DIR)
+	@mkdir -p $(STAGE_DIR)
+	@echo "Hello from drakos' VFS!" > $(STAGE_DIR)/HELLO.TXT
+	@mcopy -i $(DISK_IMG) $(STAGE_DIR)/HELLO.TXT ::/HELLO.TXT
+
+
 clean:
-	rm -rf $(BUILD) iso_root/kernel.elf iso_root/BOOTX64.EFI $(ISO)
+	rm -rf $(BUILD) $(ISO) iso_root $(STAGE_DIR) 
 
 
-run: $(ISO)
+run: $(ISO) images seed_disk
 	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio \
 		-device qemu-xhci,id=xhci \
 		-device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 \
@@ -116,5 +147,5 @@ run: $(ISO)
 		-device ahci,id=ahci \
 		-device ide-hd,drive=disk,bus=ahci.0
 
-debug: $(ISO)
+debug: $(ISO) images
 	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 -device usb-kbd,bus=xhci.0 -drive id=disk,file=disk.img,if=none -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 -s -S
