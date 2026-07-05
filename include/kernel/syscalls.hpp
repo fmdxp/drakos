@@ -16,7 +16,10 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-
 #pragma once
+#include <stdint.h>
 
-#define DRAKOS_KERNEL_VER "0.1"
+
+extern "C" void syscall_entry();
+void enable_syscalls();
+extern "C" void syscall_handler(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6, uint64_t sys_num);

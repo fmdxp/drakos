@@ -73,10 +73,10 @@ public:
 
 private:
     uintptr_t m_xhci_bar = 0;
-    PCIDevice m_xhci_device = {0};
+    PCIDevice m_xhci_device {};
 
     uintptr_t m_ahci_bar = 0;
-    PCIDevice m_ahci_device = {0};
+    PCIDevice m_ahci_device {};
 
     void check_bus(uint8_t bus);
     void check_device(uint8_t bus, uint8_t device);

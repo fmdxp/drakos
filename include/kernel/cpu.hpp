@@ -19,9 +19,4 @@
 
 #pragma once
 
-#include "limine.h"
-
-extern volatile struct limine_memmap_request g_memmap_request;
-extern volatile struct limine_hhdm_request   g_hhdm_request;
-extern volatile struct limine_framebuffer_request g_framebuffer_request;
-extern volatile struct limine_rsdp_request   g_rsdp_request;
+void enable_fpu_and_avx();

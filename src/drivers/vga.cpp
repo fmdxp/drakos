@@ -21,17 +21,27 @@
 #include "font.hpp"
 #include "serial.hpp"
 #include "limine_requests.hpp"
+#include "memory.hpp"
 
 // We create a static BitmapFont structure
 static BitmapFont s_default_font;
 
+static volatile bool fb_lock = false;
+
+static inline void lock_fb() {
+    while (__atomic_test_and_set(&fb_lock, __ATOMIC_ACQUIRE)) {}
+}
+
+static inline void unlock_fb() {
+    __atomic_clear(&fb_lock, __ATOMIC_RELEASE);
+}
+
 bool VGA::start() {
     // Check if Limine provided a framebuffer
-    if (!g_framebuffer_request.response || g_framebuffer_request.response->framebuffer_count < 1) {
-        return false;
-    }
+    if (!g_framebuffer_request.response || g_framebuffer_request.response->framebuffer_count < 1) return false;
+    
 
-    struct limine_framebuffer *fb = g_framebuffer_request.response->framebuffers[0];
+    auto* fb = g_framebuffer_request.response->framebuffers[0];
     
     // Save framebuffer details
     m_framebuffer = reinterpret_cast<uint32_t*>(fb->address);
@@ -49,25 +59,15 @@ bool VGA::start() {
 
     // Load our default Terminus font
     s_default_font.load(_binary_src_fonts_Lat2_Terminus16_psf_start);
-    if (!selectBitmapFont(&s_default_font)) {
-        return false; // Font failed to load/validate
-    }
-
-    // Clear the screen to black
-    for (size_t y = 0; y < m_height; y++) {
-        for (size_t x = 0; x < m_width; x++) {
-            put_pixel(x, y, m_bg_color);
-        }
-    }
-
-    // Draw the initial cursor
-    draw_cursor();
+    if (!selectBitmapFont(&s_default_font)) return false; // Font failed to load/validate
+    
+    clear_screen();
 
     return true;
 }
 
 void VGA::stop() {
-    // Usually nothing to do for VGA stop in a basic kernel
+    // nothing for now
 }
 
 const char* VGA::get_name() const {
@@ -98,133 +98,111 @@ void VGA::put_pixel(uint32_t x, uint32_t y, uint32_t color) {
 void VGA::write_char(char c) {
     if (!m_font) return;
 
-    // We are about to change cursor position, clear the old one
-    clear_cursor();
+    lock_fb();
+
+    const uint32_t w = m_font->get_width();
+    const uint32_t h = m_font->get_height();
 
     // Handle newline
     if (c == '\n') {
         m_cursor_x = 0;
-        m_cursor_y += m_font->get_height();
-        if (m_cursor_y + m_font->get_height() > m_height) scroll();
-        draw_cursor();
+        m_cursor_y += h;
+        if (m_cursor_y + h > m_height) scroll();
+        unlock_fb();
         return;
     }
 
     // Handle backspace
     if (c == '\b') {
-        if (m_cursor_x >= m_font->get_width()) {
-            m_cursor_x -= m_font->get_width();
+        if (m_cursor_x >= w) {
+            m_cursor_x -= w;
+
             // Erase character on screen
-            for (uint32_t cy = 0; cy < m_font->get_height(); cy++) {
-                for (uint32_t cx = 0; cx < m_font->get_width(); cx++) {
-                    put_pixel(m_cursor_x + cx, m_cursor_y + cy, m_bg_color);
-                }
-            }
+            for (uint32_t y = 0; y < m_font->get_height(); y++) 
+                for (uint32_t x = 0; x < m_font->get_width(); x++) 
+                    put_pixel(m_cursor_x + x, m_cursor_y + y, m_bg_color);  
         }
-        draw_cursor();
+
+        unlock_fb();
         return;
     }
 
     // Get the glyph data for this character
     const uint8_t* glyph = m_font->get_glyph(c);
-    uint8_t glyph_width = m_font->get_width();
-    uint8_t glyph_height = m_font->get_height();
 
     // Check if we need to wrap to the next line
-    if (m_cursor_x + glyph_width >= m_width) {
+    if (m_cursor_x + w >= m_width) {
         m_cursor_x = 0;
-        m_cursor_y += glyph_height;
-        if (m_cursor_y + glyph_height > m_height) scroll();
+        m_cursor_y += h;
+        if (m_cursor_y + h > m_height) scroll();
     }
 
-    // TODO: Handle scrolling if m_cursor_y + glyph_height >= m_height
 
     // Draw the glyph pixel by pixel
-    for (uint32_t cy = 0; cy < glyph_height; cy++) {
+    for (uint32_t y = 0; y < h; y++) {
         // Each row of the glyph is 1 byte (8 pixels)
-        uint8_t row = glyph[cy];
+        uint8_t row = glyph[y];
         
-        for (uint32_t cx = 0; cx < glyph_width; cx++) {
+        for (uint32_t x = 0; x < w; x++) {
             // Check the current bit. MSB (0x80) is the leftmost pixel.
-            bool bit_set = (row & (0x80 >> cx)) != 0;
-            
-            uint32_t color = bit_set ? m_fg_color : m_bg_color;
-            put_pixel(m_cursor_x + cx, m_cursor_y + cy, color);
+            bool bit = row & (0x80 >> x);
+            put_pixel(m_cursor_x + x, m_cursor_y + y, bit ? m_fg_color : m_bg_color);
         }
     }
 
     // Advance cursor
-    m_cursor_x += glyph_width;
-    
-    // Check if wrapping is needed immediately after advancing
-    if (m_cursor_x + glyph_width >= m_width) {
-        m_cursor_x = 0;
-        m_cursor_y += glyph_height;
-        if (m_cursor_y + glyph_height > m_height) scroll();
-    }
-
-    draw_cursor();
+    m_cursor_x += w;
+    unlock_fb();
 }
 
 void VGA::write(const char* str) {
-    while (*str) {
-        write_char(*str++);
-    }
+    while (*str) write_char(*str++);
 }
 
 void VGA::scroll() {
     if (!m_font) return;
     
-    uint32_t font_h = m_font->get_height();
+    uint32_t h = m_font->get_height();
     
+    uint8_t* base = reinterpret_cast<uint8_t*>(m_framebuffer);
+
     // Calculate the number of bytes to move
     // We move everything from the second row of text up to the top
-    uint32_t bytes_to_move = m_pitch * (m_height - font_h);
+    uint32_t bytes = m_pitch * (m_height - h);
     
-    // Copy the memory up
-    uint8_t* dest = reinterpret_cast<uint8_t*>(m_framebuffer);
-    uint8_t* src = dest + (m_pitch * font_h);
-    for (uint32_t i = 0; i < bytes_to_move; i++) {
-        dest[i] = src[i];
-    }
+    kmemmove(base, base + (m_pitch * h), bytes);
     
     // Clear the last line
-    for (uint32_t y = m_height - font_h; y < m_height; y++) {
+    for (uint32_t y = m_height - h; y < m_height; y++) {
         for (uint32_t x = 0; x < m_width; x++) {
             put_pixel(x, y, m_bg_color);
         }
     }
     
-    // Update cursor position
-    m_cursor_y -= font_h;
+    if (m_cursor_y >= h) m_cursor_y -= h;
 }
 
+
 void VGA::draw_cursor() {
-    if (!m_font) return;
-    
-    // Draw a solid block using foreground color
-    uint32_t w = m_font->get_width();
-    uint32_t h = m_font->get_height();
-    
-    for (uint32_t cy = 0; cy < h; cy++) {
-        for (uint32_t cx = 0; cx < w; cx++) {
-            put_pixel(m_cursor_x + cx, m_cursor_y + cy, m_fg_color);
-        }
-    }
+    // We don't need it for now, so I removed it (created bug)
 }
 
 void VGA::clear_cursor() {
-    if (!m_font) return;
-    
-    // Clear the block using background color
-    uint32_t w = m_font->get_width();
-    uint32_t h = m_font->get_height();
-    
-    for (uint32_t cy = 0; cy < h; cy++) {
-        for (uint32_t cx = 0; cx < w; cx++) {
-            put_pixel(m_cursor_x + cx, m_cursor_y + cy, m_bg_color);
+    // ...
+}
+
+
+
+void VGA::clear_screen() {
+    lock_fb();
+
+    for (uint32_t y = 0; y < m_height; y++) {
+        for (uint32_t x = 0; x < m_width; x++) {
+            put_pixel(x, y, m_bg_color);
         }
     }
+
+    unlock_fb();
 }
 
 // Register VGA driver as module (level 3_drv)

@@ -18,10 +18,10 @@
 
 
 #pragma once
+#include "thread.hpp"
 
-#include "limine.h"
+#define DRAKOS_KERNEL_VER "0.1"
 
-extern volatile struct limine_memmap_request g_memmap_request;
-extern volatile struct limine_hhdm_request   g_hhdm_request;
-extern volatile struct limine_framebuffer_request g_framebuffer_request;
-extern volatile struct limine_rsdp_request   g_rsdp_request;
+Thread* g_gamepad_thread = nullptr;
+Thread* g_usb_thread = nullptr;
+Thread* g_kernel_thread = nullptr;

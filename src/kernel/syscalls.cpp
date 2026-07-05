@@ -17,11 +17,24 @@
  */
 
 
-#pragma once
+#include "syscalls.hpp"
+#include "msr.hpp"
 
-#include "limine.h"
+void enable_syscalls() {
+    uint64_t efer = rdmsr(0xC0000080);
+    efer |= 1;
+    wrmsr(0xC0000080, efer);
 
-extern volatile struct limine_memmap_request g_memmap_request;
-extern volatile struct limine_hhdm_request   g_hhdm_request;
-extern volatile struct limine_framebuffer_request g_framebuffer_request;
-extern volatile struct limine_rsdp_request   g_rsdp_request;
+    uint64_t star = ((uint64_t)0x10 << 48) | ((uint64_t)0x08 << 32);
+    wrmsr(0xC0000081, star);
+    wrmsr(0xC0000082, (uint64_t)syscall_entry);
+    wrmsr(0xC0000084, 0x200); 
+}
+
+extern "C" void syscall_handler(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6, uint64_t sys_num) {
+    (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5; (void)arg6;
+
+    if (sys_num == 0) {
+        // dummy debug syscall
+    }
+}

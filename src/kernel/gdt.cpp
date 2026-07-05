@@ -60,7 +60,7 @@ bool GDT::start() {
     set_entry(4, 0, 0xFFFFF, 0xFA, 0xA0);
     
     // Clear TSS
-    for (int i = 0; i < sizeof(TSSEntry); i++) {
+    for (size_t i = 0; i < sizeof(TSSEntry); i++) {
         ((uint8_t*)&tss)[i] = 0;
     }
     tss.iopb_offset = sizeof(TSSEntry); // No IOPB

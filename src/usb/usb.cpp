@@ -17,13 +17,13 @@
  */
 
 
-#include "usb/usb.hpp"
-#include "usb/usb_msc.hpp"
-#include "drivers/xhci.hpp"
-#include "input/dualsense.hpp"
-#include "fs/fat32.hpp"
-#include "fs/vfs.hpp"
-#include "fs/vfs_fat32.hpp"
+#include "usb.hpp"
+#include "usb_msc.hpp"
+#include "xhci.hpp"
+#include "dualsense.hpp"
+#include "fat32.hpp"
+#include "vfs.hpp"
+#include "vfs_fat32.hpp"
 #include "vga.hpp"
 #include "pmm.hpp"
 #include "vmm.hpp"
@@ -253,6 +253,14 @@ bool USBManager::has_pending_tasks() {
         if (m_pending[i].valid) return true;
     }
     return false;
+}
+
+
+void usb_thread_main() {
+    while (1) {
+        if (g_usb_manager && g_usb_manager->has_pending_tasks()) g_usb_manager->update();
+        else scheduler_block_current_thread();
+    }
 }
 
 

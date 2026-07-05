@@ -100,3 +100,5 @@ private:
 };
 
 extern USBManager* g_usb_manager;
+
+void usb_thread_main();

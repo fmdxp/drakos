@@ -302,8 +302,8 @@ bool AHCIDisk::read_blocks(uint64_t lba, uint32_t count, void* buffer) {
     return true;
 }
 
-bool AHCIDisk::write_blocks(uint64_t lba, uint32_t count, const void* buffer) {
-    return false; // Implement me
+bool AHCIDisk::write_blocks([[maybe_unused]] uint64_t lba, [[maybe_unused]] uint32_t count, [[maybe_unused]] const void* buffer) {
+    return false; // TODO: Implement me
 }
 
 } // namespace AHCI

@@ -288,7 +288,7 @@ void XHCI::reset_port(uint32_t port_num) {
     }
     
     // Send Enable Slot Command
-    TRB cmd = {0};
+    TRB cmd {};
     cmd.control = (TRB_CMD_ENABLE_SLOT << 10);
     send_command(cmd);
 }
@@ -297,18 +297,16 @@ void XHCI::send_command(const TRB& trb) {
     TRB* cmd_ring = reinterpret_cast<TRB*>(m_cmd_ring_phys + pmm_hhdm_offset());
     
     TRB new_trb = trb;
-    if (m_cmd_ring_pcs) {
-        new_trb.control |= 1; // Cycle bit
-    } else {
-        new_trb.control &= ~1;
-    }
+    if (m_cmd_ring_pcs) new_trb.control |= 1; // Cycle bit
+    else new_trb.control &= ~1;
+    
     
     cmd_ring[m_cmd_ring_index] = new_trb;
     m_cmd_ring_index++;
     
     if (m_cmd_ring_index == 255) {
         // Handle Link TRB to wrap around (simplified)
-        TRB link_trb = {0};
+        TRB link_trb {};
         link_trb.parameter1 = m_cmd_ring_phys & 0xFFFFFFFF;
         link_trb.parameter2 = (m_cmd_ring_phys >> 32) & 0xFFFFFFFF;
         link_trb.control = (TRB_LINK << 10) | (1 << 1); // Toggle Cycle
@@ -418,7 +416,7 @@ void XHCI::configure_slot(uint32_t slot_id, uint32_t port_speed, uint32_t port_n
     m_ep0_ring_pcs[slot_id] = true;
 
     // 3. Send Address Device Command (TRB Type 11)
-    TRB cmd = {0};
+    TRB cmd {};
     cmd.parameter1 = in_ctx_phys & 0xFFFFFFFF;
     cmd.parameter2 = (in_ctx_phys >> 32) & 0xFFFFFFFF;
     cmd.control = (11 << 10) | (slot_id << 24);
@@ -440,7 +438,7 @@ bool XHCI::do_control_transfer(uint32_t slot_id, uint8_t request_type, uint8_t r
         ring_idx++;
     };
     
-    TRB setup = {0};
+    TRB setup {};
     setup.parameter1 = request_type | (request << 8) | (value << 16);
     setup.parameter2 = index | (length << 16);
     setup.status = 8;
@@ -449,7 +447,7 @@ bool XHCI::do_control_transfer(uint32_t slot_id, uint8_t request_type, uint8_t r
     enqueue_trb(setup);
     
     if (length > 0) {
-        TRB data = {0};
+        TRB data {};
         data.parameter1 = reinterpret_cast<uintptr_t>(buffer_phys) & 0xFFFFFFFF;
         data.parameter2 = (reinterpret_cast<uintptr_t>(buffer_phys) >> 32) & 0xFFFFFFFF;
         data.status = length;
@@ -458,7 +456,7 @@ bool XHCI::do_control_transfer(uint32_t slot_id, uint8_t request_type, uint8_t r
         enqueue_trb(data);
     }
     
-    TRB status = {0};
+    TRB status {};
     uint32_t dir = (request_type & 0x80) ? 0 : 1;
     if (length == 0) dir = 1;
     status.control = (TRB_STATUS_STAGE << 10) | (dir << 16) | (1 << 5);
@@ -467,10 +465,7 @@ bool XHCI::do_control_transfer(uint32_t slot_id, uint8_t request_type, uint8_t r
     m_transfer_complete = false;
     ring_doorbell(slot_id, 1);
     
-    while (!m_transfer_complete) {
-        asm volatile("pause");
-    }
-    
+    while (!m_transfer_complete) asm volatile("pause");
     return true;
 }
 
@@ -520,7 +515,7 @@ bool XHCI::configure_endpoint(uint32_t slot_id, uint8_t ep_num, uint8_t ep_type,
     
     in_ctx[ep_ctx_idx + 4] = max_packet_size;
     
-    TRB cmd = {0};
+    TRB cmd {};
     cmd.parameter1 = in_ctx_phys & 0xFFFFFFFF;
     cmd.parameter2 = (in_ctx_phys >> 32) & 0xFFFFFFFF;
     cmd.control = (12 << 10) | (slot_id << 24); // Configure Endpoint TRB
@@ -544,7 +539,7 @@ bool XHCI::submit_interrupt_in(uint32_t slot_id, void* buffer_phys, uint32_t len
     uint32_t& ring_idx = m_int_ring_indices[slot_id];
     bool& pcs = m_int_ring_pcs[slot_id];
     
-    TRB trb = {0};
+    TRB trb {};
     trb.parameter1 = reinterpret_cast<uintptr_t>(buffer_phys) & 0xFFFFFFFF;
     trb.parameter2 = (reinterpret_cast<uintptr_t>(buffer_phys) >> 32) & 0xFFFFFFFF;
     trb.status = length;
@@ -650,7 +645,7 @@ bool XHCI::configure_bulk_endpoints(uint32_t slot_id, uint8_t ep_out_num, uint8_
     in_ctx[ep_in_idx + 4] = max_packet_size;
 
     // Send Configure Endpoint command
-    TRB cmd = {0};
+    TRB cmd {};
     cmd.parameter1 = in_ctx_phys & 0xFFFFFFFF;
     cmd.parameter2 = (in_ctx_phys >> 32) & 0xFFFFFFFF;
     cmd.control    = (12 << 10) | (slot_id << 24); // Configure Endpoint TRB
@@ -670,7 +665,7 @@ bool XHCI::submit_bulk_out(uint32_t slot_id, void* buffer_phys, uint32_t length)
     uint32_t& idx = m_bulk_out_ring_indices[slot_id];
     bool& pcs = m_bulk_out_ring_pcs[slot_id];
 
-    TRB trb = {0};
+    TRB trb {};
     trb.parameter1 = reinterpret_cast<uintptr_t>(buffer_phys) & 0xFFFFFFFF;
     trb.parameter2 = (reinterpret_cast<uintptr_t>(buffer_phys) >> 32) & 0xFFFFFFFF;
     trb.status  = length;
@@ -699,7 +694,7 @@ bool XHCI::submit_bulk_in(uint32_t slot_id, void* buffer_phys, uint32_t length) 
     uint32_t& idx = m_bulk_in_ring_indices[slot_id];
     bool& pcs = m_bulk_in_ring_pcs[slot_id];
 
-    TRB trb = {0};
+    TRB trb {};
     trb.parameter1 = reinterpret_cast<uintptr_t>(buffer_phys) & 0xFFFFFFFF;
     trb.parameter2 = (reinterpret_cast<uintptr_t>(buffer_phys) >> 32) & 0xFFFFFFFF;
     trb.status  = length;

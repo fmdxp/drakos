@@ -35,6 +35,7 @@ public:
     void scroll();
     void draw_cursor();
     void clear_cursor();
+    void clear_screen();
 
     bool selectBitmapFont(const BitmapFont* font);
 

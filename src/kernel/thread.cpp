@@ -40,7 +40,7 @@ Process::Process() {
 Process::~Process() {
 }
 
-Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, char* thread_name) {
+Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unused]] const char* const thread_name) {
     static uint64_t next_tid = 1;
     tid = next_tid++;
     parent_process = parent;

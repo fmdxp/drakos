@@ -95,6 +95,10 @@ public:
         if (index >= 0 && index < 4) return &gamepads[index];
         return nullptr;
     }
+
+    static void gamepad_debug_poll();
 };
 
 } // namespace Input
+
+void gamepad_thread_main();

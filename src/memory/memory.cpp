@@ -16,12 +16,27 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "memory.hpp"
+#include <stdint.h>
 
-#pragma once
+void* kmemmove(void* dest, const void* src, size_t n)
+{
+    uint8_t* d = (uint8_t*)dest;
+    const uint8_t* s = (const uint8_t*)src;
 
-#include "limine.h"
+    if (!dest || !src || n == 0)
+        return dest;
 
-extern volatile struct limine_memmap_request g_memmap_request;
-extern volatile struct limine_hhdm_request   g_hhdm_request;
-extern volatile struct limine_framebuffer_request g_framebuffer_request;
-extern volatile struct limine_rsdp_request   g_rsdp_request;
+    if (d < s)
+    {
+        for (size_t i = 0; i < n; i++)
+            d[i] = s[i];
+    }
+    else
+    {
+        for (size_t i = n; i > 0; i--)
+            d[i - 1] = s[i - 1];
+    }
+
+    return dest;
+}

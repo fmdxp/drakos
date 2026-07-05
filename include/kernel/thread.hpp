@@ -49,7 +49,7 @@ public:
 };
 
 
-typedef enum ThreadState {
+enum ThreadState {
     THREAD_RUNNING,     // Thread is running
     THREAD_READY,       // Thread is ready to be run
     THREAD_BLOCKED,     // Thread is suspended, waiting for an external event
@@ -61,7 +61,7 @@ typedef enum ThreadState {
 
 class Thread {
 public:
-    Thread(Process* parent, void (*entry_point)(), bool is_user, char* thread_name);
+    Thread(Process* parent, void (*entry_point)(), bool is_user, const char* const thread_name);
     ~Thread();
 
     // Thread ID

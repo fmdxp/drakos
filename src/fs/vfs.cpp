@@ -89,9 +89,9 @@ bool VFSManager::unmount(const char* path) {
 
 // ─── resolve: find longest-prefix matching mount ──────────────────────────────
 FileSystem* VFSManager::resolve(const char* path, const char** rel_out) {
-    int    best_len = -1;
+
+    int         best_len = -1;
     FileSystem* best_fs = nullptr;
-    const char* best_path = nullptr;
 
     for (int i = 0; i < MAX_MOUNTS; i++) {
         if (!m_mounts[i].used) continue;
@@ -100,16 +100,17 @@ FileSystem* VFSManager::resolve(const char* path, const char** rel_out) {
             if ((int)plen > best_len) {
                 best_len  = (int)plen;
                 best_fs   = m_mounts[i].fs;
-                best_path = m_mounts[i].path;
             }
         }
     }
+
 
     if (!best_fs) return nullptr;
 
     // Advance past mount prefix; skip leading '/'
     *rel_out = path + best_len;
     if (**rel_out == '/') (*rel_out)++;
+    
     return best_fs;
 }
 

@@ -22,18 +22,6 @@
 #include "vmm.hpp"
 #include "pmm.hpp"
 
-// Convert an integer to a hex string manually, since we don't have printf
-static void print_hex(uint32_t val, int digits) {
-    if (!g_vga) return;
-    
-    g_vga->write("0x");
-    for (int i = digits - 1; i >= 0; i--) {
-        uint8_t nibble = (val >> (i * 4)) & 0x0F;
-        if (nibble < 10) g_vga->write_char('0' + nibble);
-        else g_vga->write_char('A' + (nibble - 10));
-    }
-}
-
 uint32_t PCI::read(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset) {
     uint32_t address = 
         (1 << 31) | 
@@ -158,7 +146,7 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
     return false;
 }
 
-void PCI::print_device(const PCIDevice& dev) {
+void PCI::print_device( [[maybe_unused]] const PCIDevice& dev) {
     if (!g_vga) return;
     
     // g_vga->write("PCI ");
