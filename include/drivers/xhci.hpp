@@ -64,6 +64,17 @@ private:
     uint32_t  m_int_ring_indices[256] = {0};
     bool      m_int_ring_pcs[256] = {false};
     uint8_t   m_int_ep_dci[256] = {0}; // The DCI index used for the interrupt ring
+
+    // Bulk Transfer Rings (for USB MSC)
+    uintptr_t m_bulk_out_rings_phys[256] = {0};
+    uint32_t  m_bulk_out_ring_indices[256] = {0};
+    bool      m_bulk_out_ring_pcs[256] = {false};
+    uint8_t   m_bulk_out_dci[256] = {0};
+
+    uintptr_t m_bulk_in_rings_phys[256] = {0};
+    uint32_t  m_bulk_in_ring_indices[256] = {0};
+    bool      m_bulk_in_ring_pcs[256] = {false};
+    uint8_t   m_bulk_in_dci[256] = {0};
     
     volatile bool m_transfer_complete = false;
     volatile bool m_port_setup_complete = false;
@@ -88,7 +99,10 @@ private:
 public:
     bool do_control_transfer(uint32_t slot_id, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, uint16_t length, void* buffer_phys);
     bool configure_endpoint(uint32_t slot_id, uint8_t ep_num, uint8_t ep_type, uint16_t max_packet_size, uint8_t interval);
+    bool configure_bulk_endpoints(uint32_t slot_id, uint8_t ep_out_num, uint8_t ep_in_num, uint16_t max_packet_size);
     bool submit_interrupt_in(uint32_t slot_id, void* buffer_phys, uint32_t length);
+    bool submit_bulk_out(uint32_t slot_id, void* buffer_phys, uint32_t length);
+    bool submit_bulk_in(uint32_t slot_id, void* buffer_phys, uint32_t length);
     
     void handle_interrupt();
     void poll_event_ring();

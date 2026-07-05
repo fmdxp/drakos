@@ -197,6 +197,26 @@ void PCI::check_function(uint8_t bus, uint8_t device, uint8_t func) {
         //     g_vga->write("  -> xHCI Controller Found and Enabled!\n");
         // }
     }
+
+
+    // Is this an AHCI (SATA) Controller?
+    if (class_code == 0x01 && subclass == 0x06) {
+        uint32_t bar5 = read(bus, device, func, 0x24);
+
+        m_ahci_bar = (bar5 & 0xFFFFFFF0);
+        m_ahci_device = pci_dev;
+
+        uint32_t cmd = read(bus, device, func, 0x04);
+        cmd |= (1 << 2) | (1 << 1);
+        write(bus, device, func, 0x04, cmd);
+
+        cmd |= (1 << 10);
+        write(bus, device, func, 0x04, cmd);
+
+        if (g_vga) {
+            g_vga->write("  -> AHCI (SATA) Controller Found and Enabled!\n");
+        }
+    }
 }
 
 void PCI::check_device(uint8_t bus, uint8_t device) {

@@ -1,6 +1,10 @@
 #include "usb/usb.hpp"
+#include "usb/usb_msc.hpp"
 #include "drivers/xhci.hpp"
 #include "input/dualsense.hpp"
+#include "fs/fat32.hpp"
+#include "fs/vfs.hpp"
+#include "fs/vfs_fat32.hpp"
 #include "vga.hpp"
 #include "pmm.hpp"
 #include "vmm.hpp"
@@ -121,11 +125,57 @@ void USBManager::enumerate_device(uint8_t slot_id, XHCI* xhci) {
         
         if (type == 4) { // Interface Descriptor
             USBInterfaceDescriptor* intf = reinterpret_cast<USBInterfaceDescriptor*>(ptr);
-            // Class 3 is HID
-            if (intf->bInterfaceClass == 3) {
-                in_hid_interface = true;
-            } else {
-                in_hid_interface = false;
+            in_hid_interface = (intf->bInterfaceClass == 3);
+            
+            // Detect Mass Storage (class 0x08, subclass 0x06 = SCSI, protocol 0x50 = BOT)
+            if (intf->bInterfaceClass == 0x08 &&
+                intf->bInterfaceSubClass == 0x06 &&
+                intf->bInterfaceProtocol == 0x50) {
+                if (g_vga) g_vga->write("USB: Mass Storage (SCSI BOT) detected!\n");
+                
+                // Scan for bulk OUT and bulk IN endpoints
+                uint8_t ep_out = 0, ep_in = 0;
+                uint16_t bulk_mps = 512;
+                uint8_t* ep_ptr = ptr + ptr[0];
+                while (ep_ptr < end) {
+                    if (ep_ptr[0] == 0) break;
+                    if (ep_ptr[1] == 5) { // Endpoint descriptor
+                        USBEndpointDescriptor* ep = reinterpret_cast<USBEndpointDescriptor*>(ep_ptr);
+                        bool is_bulk = (ep->bmAttributes & 0x03) == 2;
+                        bool is_in   = (ep->bEndpointAddress & 0x80) != 0;
+                        uint8_t ep_num = ep->bEndpointAddress & 0x0F;
+                        if (is_bulk && is_in  && ep_in  == 0) { ep_in  = ep_num; bulk_mps = ep->wMaxPacketSize; }
+                        if (is_bulk && !is_in && ep_out == 0) { ep_out = ep_num; }
+                    }
+                    if (ep_ptr[1] == 4) break; // Next interface
+                    ep_ptr += ep_ptr[0];
+                }
+                
+                if (ep_out && ep_in) {
+                    // SET_CONFIGURATION
+                    uint8_t cfg_val = reinterpret_cast<USBConfigDescriptor*>(cfg_buf_virt)->bConfigurationValue;
+                    xhci->do_control_transfer(slot_id, 0x00, 9, cfg_val, 0, 0,
+                                              reinterpret_cast<void*>(pmm_alloc(1)));
+                    
+                    // Configure bulk endpoints
+                    xhci->configure_bulk_endpoints(slot_id, ep_out, ep_in, bulk_mps);
+                    
+                    // Init USB Mass Storage driver
+                    USB::USBMassStorage* msc = new USB::USBMassStorage(slot_id, xhci);
+                    if (msc->init()) {
+                        if (g_vga) g_vga->write("USB MSC: Drive ready! Mounting FAT32...\n");
+                        
+                        // Try to mount FAT32 via VFS
+                        VFS::Fat32FS* vfs_fs = new VFS::Fat32FS(msc);
+                        if (vfs_fs->init()) {
+                            vfs_mount("/usb", vfs_fs);
+                        } else {
+                            if (g_vga) g_vga->write("USB MSC: FAT32 mount failed!\n");
+                        }
+                    }
+                } else {
+                    if (g_vga) g_vga->write("USB MSC: Bulk endpoints not found!\n");
+                }
             }
         }
         

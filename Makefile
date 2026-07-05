@@ -58,7 +58,10 @@ CXXFLAGS = 	-std=c++20 -O2 -Wall -Wextra \
 			-Iinclude \
 			-Iinclude/drivers \
 			-Iinclude/kernel \
-			-Iinclude/memory 
+			-Iinclude/memory \
+			-Iinclude/fs \
+			-Iinclude/usb \
+			-Iinclude/input
 
 LDFLAGS	=	-T linker.ld -nostdlib
 
@@ -103,7 +106,15 @@ clean:
 
 
 run: $(ISO)
-	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 -device usb-kbd,bus=xhci.0
+	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio \
+		-device qemu-xhci,id=xhci \
+		-device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 \
+		-device usb-kbd,bus=xhci.0 \
+		-drive id=usbdisk,file=usb_stick.img,if=none,format=raw \
+		-device usb-storage,bus=xhci.0,drive=usbdisk \
+		-drive id=disk,file=disk.img,if=none,format=raw \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=disk,bus=ahci.0
 
 debug: $(ISO)
-	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 -device usb-kbd,bus=xhci.0 -s -S
+	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 -device usb-kbd,bus=xhci.0 -drive id=disk,file=disk.img,if=none -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 -s -S

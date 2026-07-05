@@ -552,6 +552,155 @@ bool XHCI::submit_interrupt_in(uint32_t slot_id, void* buffer_phys, uint32_t len
     return true;
 }
 
+// Helper to add a ring to the bulk endpoint arrays and configure it
+static uintptr_t alloc_and_init_ring(TRB*& ring_out) {
+    uintptr_t ring_phys = pmm_alloc(1);
+    ring_out = reinterpret_cast<TRB*>(ring_phys + pmm_hhdm_offset());
+    for (int i = 0; i < 256; i++) {
+        ring_out[i].parameter1 = 0;
+        ring_out[i].parameter2 = 0;
+        ring_out[i].status     = 0;
+        ring_out[i].control    = 0;
+    }
+    // Link TRB at slot 255
+    ring_out[255].parameter1 = ring_phys & 0xFFFFFFFF;
+    ring_out[255].parameter2 = (ring_phys >> 32) & 0xFFFFFFFF;
+    ring_out[255].control    = (6 << 10) | (1 << 1); // Link TRB, TC
+    return ring_phys;
+}
+
+bool XHCI::configure_bulk_endpoints(uint32_t slot_id, uint8_t ep_out_num, uint8_t ep_in_num, uint16_t max_packet_size) {
+    uint32_t hccparams1 = read32(0x10);
+    bool csz = (hccparams1 & (1 << 2)) != 0;
+    uint32_t ctx_size = csz ? 64 : 32;
+
+    uintptr_t in_ctx_phys = pmm_alloc(1);
+    uint32_t* in_ctx = reinterpret_cast<uint32_t*>(in_ctx_phys + pmm_hhdm_offset());
+    for (int i = 0; i < 1024; i++) in_ctx[i] = 0;
+
+    // DCI: OUT endpoint = ep_out_num*2, IN endpoint = ep_in_num*2 + 1
+    uint8_t dci_out = ep_out_num * 2;
+    uint8_t dci_in  = ep_in_num  * 2 + 1;
+    m_bulk_out_dci[slot_id] = dci_out;
+    m_bulk_in_dci[slot_id]  = dci_in;
+
+    // Input Control Context: add slot + both endpoints
+    in_ctx[1] = (1 << 0) | (1 << dci_out) | (1 << dci_in);
+
+    // Slot Context: set Context Entries = max DCI
+    uint32_t slot_ctx_idx = ctx_size / 4;
+    uint8_t max_dci = (dci_in > dci_out) ? dci_in : dci_out;
+    // Keep existing slot info but update context entries
+    // Read existing output context from DCBAA
+    uintptr_t* dcbaa = reinterpret_cast<uintptr_t*>(m_dcbaa_phys + pmm_hhdm_offset());
+    if (dcbaa[slot_id]) {
+        uint32_t* out_ctx = reinterpret_cast<uint32_t*>(dcbaa[slot_id] + pmm_hhdm_offset());
+        // Copy slot context from output ctx
+        uint32_t out_slot_base = ctx_size / 4;
+        for (uint32_t i = 0; i < ctx_size / 4; i++)
+            in_ctx[slot_ctx_idx + i] = out_ctx[out_slot_base + i];
+    }
+    in_ctx[slot_ctx_idx + 0] = (in_ctx[slot_ctx_idx + 0] & ~(0x1F << 27)) | ((uint32_t)max_dci << 27);
+
+    // Allocate OUT ring
+    TRB* out_ring;
+    uintptr_t out_ring_phys = alloc_and_init_ring(out_ring);
+    m_bulk_out_rings_phys[slot_id]  = out_ring_phys;
+    m_bulk_out_ring_indices[slot_id] = 0;
+    m_bulk_out_ring_pcs[slot_id]    = true;
+
+    // Allocate IN ring
+    TRB* in_ring;
+    uintptr_t in_ring_phys = alloc_and_init_ring(in_ring);
+    m_bulk_in_rings_phys[slot_id]  = in_ring_phys;
+    m_bulk_in_ring_indices[slot_id] = 0;
+    m_bulk_in_ring_pcs[slot_id]    = true;
+
+    // Configure OUT endpoint context (Bulk OUT = type 2)
+    uint32_t ep_out_idx = (ctx_size * (dci_out + 1)) / 4;
+    in_ctx[ep_out_idx + 1] = (2 << 3) | (max_packet_size << 16); // EP Type=Bulk OUT
+    in_ctx[ep_out_idx + 2] = (out_ring_phys & 0xFFFFFFFF) | 1;   // TR Dequeue Lo | DCS
+    in_ctx[ep_out_idx + 3] = (out_ring_phys >> 32) & 0xFFFFFFFF;
+    in_ctx[ep_out_idx + 4] = max_packet_size;
+
+    // Configure IN endpoint context (Bulk IN = type 6)
+    uint32_t ep_in_idx = (ctx_size * (dci_in + 1)) / 4;
+    in_ctx[ep_in_idx + 1] = (6 << 3) | (max_packet_size << 16);  // EP Type=Bulk IN
+    in_ctx[ep_in_idx + 2] = (in_ring_phys & 0xFFFFFFFF) | 1;     // TR Dequeue Lo | DCS
+    in_ctx[ep_in_idx + 3] = (in_ring_phys >> 32) & 0xFFFFFFFF;
+    in_ctx[ep_in_idx + 4] = max_packet_size;
+
+    // Send Configure Endpoint command
+    TRB cmd = {0};
+    cmd.parameter1 = in_ctx_phys & 0xFFFFFFFF;
+    cmd.parameter2 = (in_ctx_phys >> 32) & 0xFFFFFFFF;
+    cmd.control    = (12 << 10) | (slot_id << 24); // Configure Endpoint TRB
+
+    m_transfer_complete = false;
+    send_command(cmd);
+    while (!m_transfer_complete) asm volatile("pause");
+
+    return true;
+}
+
+bool XHCI::submit_bulk_out(uint32_t slot_id, void* buffer_phys, uint32_t length) {
+    uintptr_t ring_phys = m_bulk_out_rings_phys[slot_id];
+    if (!ring_phys) return false;
+
+    TRB* ring = reinterpret_cast<TRB*>(ring_phys + pmm_hhdm_offset());
+    uint32_t& idx = m_bulk_out_ring_indices[slot_id];
+    bool& pcs = m_bulk_out_ring_pcs[slot_id];
+
+    TRB trb = {0};
+    trb.parameter1 = reinterpret_cast<uintptr_t>(buffer_phys) & 0xFFFFFFFF;
+    trb.parameter2 = (reinterpret_cast<uintptr_t>(buffer_phys) >> 32) & 0xFFFFFFFF;
+    trb.status  = length;
+    trb.control = (TRB_NORMAL << 10) | (1 << 5); // Normal TRB, IOC
+    if (pcs) trb.control |= 1;
+
+    ring[idx] = trb;
+    idx++;
+    if (idx == 255) {
+        if (pcs) ring[255].control |= 1; else ring[255].control &= ~1;
+        idx = 0; pcs = !pcs;
+    }
+
+    m_transfer_complete = false;
+    ring_doorbell(slot_id, m_bulk_out_dci[slot_id]);
+    int timeout = 0;
+    while (!m_transfer_complete && timeout++ < 5000000) asm volatile("pause");
+    return m_transfer_complete;
+}
+
+bool XHCI::submit_bulk_in(uint32_t slot_id, void* buffer_phys, uint32_t length) {
+    uintptr_t ring_phys = m_bulk_in_rings_phys[slot_id];
+    if (!ring_phys) return false;
+
+    TRB* ring = reinterpret_cast<TRB*>(ring_phys + pmm_hhdm_offset());
+    uint32_t& idx = m_bulk_in_ring_indices[slot_id];
+    bool& pcs = m_bulk_in_ring_pcs[slot_id];
+
+    TRB trb = {0};
+    trb.parameter1 = reinterpret_cast<uintptr_t>(buffer_phys) & 0xFFFFFFFF;
+    trb.parameter2 = (reinterpret_cast<uintptr_t>(buffer_phys) >> 32) & 0xFFFFFFFF;
+    trb.status  = length;
+    trb.control = (TRB_NORMAL << 10) | (1 << 5); // Normal TRB, IOC
+    if (pcs) trb.control |= 1;
+
+    ring[idx] = trb;
+    idx++;
+    if (idx == 255) {
+        if (pcs) ring[255].control |= 1; else ring[255].control &= ~1;
+        idx = 0; pcs = !pcs;
+    }
+
+    m_transfer_complete = false;
+    ring_doorbell(slot_id, m_bulk_in_dci[slot_id]);
+    int timeout = 0;
+    while (!m_transfer_complete && timeout++ < 5000000) asm volatile("pause");
+    return m_transfer_complete;
+}
+
 void XHCI::poll_event_ring() {
     uint32_t rts_off = read32(XHCI_RTSOFF) & ~0x1F;
     uint32_t ir0_base = rts_off + 0x0020;
@@ -657,10 +806,12 @@ void XHCI::poll_event_ring() {
                     evt_prints++;
                 }
                 if (g_dualsense_driver) {
-                    // Pass residual so driver knows actual length
                     g_dualsense_driver->on_report_received();
                 }
+                // Always signal completion so bulk waiters (MSC) can proceed
+                m_transfer_complete = true;
             } else {
+                // EP 0/1 (control): signal completion
                 m_transfer_complete = true;
             }
         } else if (trb_type == TRB_EVENT_PORT_STATUS) {

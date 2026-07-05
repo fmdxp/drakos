@@ -27,10 +27,12 @@
 #include "vga.hpp"
 #include "panic.hpp"
 #include "serial.hpp"
-#include "usb/usb.hpp"
-#include "input/gamepad.hpp"
+#include "usb.hpp"
+#include "gamepad.hpp"
 #include "thread.hpp"
-
+#include "fs/vfs.hpp"
+#include "pmm.hpp"
+#include "vmm.hpp"
 
 volatile struct limine_framebuffer_request g_framebuffer_request =
 {
@@ -150,6 +152,29 @@ void usb_thread_main() {
 Thread* g_usb_thread = nullptr;
 Thread* g_kernel_thread = nullptr;
 
+void test_vfs() {
+    if (g_vga) g_vga->write("\n--- Testing VFS ---\n");
+    
+    // Test SATA read
+    int fd1 = vfs_open("/sata/HELLO.TXT");
+    if (fd1 >= 0) {
+        uint8_t* fbuf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
+        vmm_map((uintptr_t)fbuf & ~0xFFFULL, (uintptr_t)fbuf - pmm_hhdm_offset(), VMM_MMIO);
+        
+        int n = vfs_read(fd1, fbuf, 4095);
+        if (n > 0) {
+            fbuf[n] = 0;
+            if (g_vga) { g_vga->write("VFS SATA Read: "); g_vga->write((const char*)fbuf); g_vga->write("\n"); }
+        }
+        vfs_close(fd1);
+    } else {
+        if (g_vga) g_vga->write("VFS SATA: HELLO.TXT not found\n");
+    }
+
+    // Note: USB testing will only work after USB enumeration completes in the background thread.
+    // The user might see the output interlaced.
+}
+
 extern "C" [[noreturn]] void kernel_main(void)
 {
     // 1. Initialize base hardware and VGA, so we can see output
@@ -180,6 +205,8 @@ extern "C" [[noreturn]] void kernel_main(void)
     if (!g_vga) panic("VGA did not init");
 
     g_vga->write("Welcome to drakos!\n");
+    
+    test_vfs();
     
     // Main kernel loop: process deferred USB device initialization
     // and poll gamepad input. Runs with interrupts enabled (sti from GDT init).

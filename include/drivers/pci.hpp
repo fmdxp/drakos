@@ -48,9 +48,17 @@ public:
     uintptr_t get_xhci_bar() const { return m_xhci_bar; }
     PCIDevice get_xhci_device() const { return m_xhci_device; }
 
+    uintptr_t get_ahci_bar() const { return m_ahci_bar; }
+    PCIDevice get_ahci_device() const { return m_ahci_device; }
+
+
 private:
     uintptr_t m_xhci_bar = 0;
     PCIDevice m_xhci_device = {0};
+
+    uintptr_t m_ahci_bar = 0;
+    PCIDevice m_ahci_device = {0};
+
     void check_bus(uint8_t bus);
     void check_device(uint8_t bus, uint8_t device);
     void check_function(uint8_t bus, uint8_t device, uint8_t func);
