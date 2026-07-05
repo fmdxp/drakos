@@ -109,7 +109,7 @@ $(ISO): $(KERNEL) limine.conf
 
 images:
 	@if [ ! -f $(USB_IMG) ]; then \
-		echo "[drakos] Creating USB image..."; \
+		echo "[drakos] creating USB image..."; \
 		fallocate -l $(USB_IMG_SIZE) $(USB_IMG) || dd if=/dev/zero of=$(USB_IMG) bs=1M count=64; \
 		mkfs.fat -F 32 $(USB_IMG); \
 	else \
@@ -126,14 +126,19 @@ images:
 
 
 seed_disk: images
+	@echo "[drakos] seeding disk..."
 	@rm -rf $(STAGE_DIR)
 	@mkdir -p $(STAGE_DIR)
-	@echo "Hello from drakos' VFS!" > $(STAGE_DIR)/HELLO.TXT
+	@echo "Hello from drakos VFS!" > $(STAGE_DIR)/HELLO.TXT
 	@mcopy -i $(DISK_IMG) $(STAGE_DIR)/HELLO.TXT ::/HELLO.TXT
+	@sync
+	@sleep 0.1
+	@echo "[drakos] disk seeded"
+
 
 
 clean:
-	rm -rf $(BUILD) $(ISO) iso_root $(STAGE_DIR) 
+	sudo rm -rf $(BUILD) $(ISO) iso_root $(STAGE_DIR) $(USB_IMG) $(DISK_IMG)
 
 
 run: $(ISO) images seed_disk
@@ -147,5 +152,19 @@ run: $(ISO) images seed_disk
 		-device ahci,id=ahci \
 		-device ide-hd,drive=disk,bus=ahci.0
 
-debug: $(ISO) images
-	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio -device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 -device usb-kbd,bus=xhci.0 -drive id=disk,file=disk.img,if=none -device ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 -s -S
+
+debug: $(ISO) images seed_disk
+	qemu-system-x86_64 \
+		-cpu max \
+		-bios /usr/share/ovmf/OVMF.fd \
+		-cdrom $(ISO) \
+		-m 256M \
+		-display sdl \
+		-serial stdio \
+		-device qemu-xhci,id=xhci \
+		-device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 \
+		-device usb-kbd,bus=xhci.0 \
+		-drive id=disk,file=$(DISK_IMG),if=none,format=raw \
+		-device ahci,id=ahci \
+		-device ide-hd,drive=disk,bus=ahci.0 \
+		-s -S
