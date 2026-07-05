@@ -94,7 +94,8 @@ static void enable_fpu_and_avx() {
         uint32_t xcr0_low = xcr0 & 0xFFFFFFFF;
         uint32_t xcr0_high = xcr0 >> 32;
         asm volatile("xsetbv" : : "a"(xcr0_low), "d"(xcr0_high), "c"(0));
-    } else {
+    } 
+    else {
         // Fallback for very old CPUs: Just enable standard SSE
         uint64_t cr4;
         asm volatile("mov %%cr4, %0" : "=r"(cr4));
@@ -133,6 +134,7 @@ static void enable_syscalls() {
 
 extern "C" void syscall_handler(uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6, uint64_t sys_num) {
     (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5; (void)arg6;
+
     if (sys_num == 0) {
         // dummy debug syscall
     }
@@ -141,11 +143,8 @@ extern "C" void syscall_handler(uint64_t arg1, uint64_t arg2, uint64_t arg3, uin
 
 void usb_thread_main() {
     while (1) {
-        if (g_usb_manager && g_usb_manager->has_pending_tasks()) {    // has_pending_tasks is non-existent
-            g_usb_manager->update();
-        } else {
-            scheduler_block_current_thread();
-        }
+        if (g_usb_manager && g_usb_manager->has_pending_tasks()) g_usb_manager->update();
+        else scheduler_block_current_thread();
     }
 }
 
@@ -167,9 +166,9 @@ void test_vfs() {
             if (g_vga) { g_vga->write("VFS SATA Read: "); g_vga->write((const char*)fbuf); g_vga->write("\n"); }
         }
         vfs_close(fd1);
-    } else {
-        if (g_vga) g_vga->write("VFS SATA: HELLO.TXT not found\n");
-    }
+    } 
+    else if (g_vga) g_vga->write("VFS SATA: HELLO.TXT not found\n");
+    
 
     // Note: USB testing will only work after USB enumeration completes in the background thread.
     // The user might see the output interlaced.
@@ -180,7 +179,7 @@ extern "C" [[noreturn]] void kernel_main(void)
     // 1. Initialize base hardware and VGA, so we can see output
     system_init_modules();
     
-    // 2. Enable MSR Syscalls
+    // 2. Enable MSR Syscalls (yeah, ik we're not in ring 3)
     enable_syscalls();
 
     // 3. Enable XSAVE and AVX only AFTER checking CPUID
@@ -196,12 +195,8 @@ extern "C" [[noreturn]] void kernel_main(void)
     g_kernel_thread = scheduler_get_current_thread();
 
 
-    // If framebuffer is not available, halt
-    if (g_framebuffer_request.response == NULL || g_framebuffer_request.response->framebuffer_count < 1)
-    {
-        while (1) asm volatile ("hlt");
-    }
-
+    // If framebuffer or VGA are not available, halt
+    if (g_framebuffer_request.response == NULL || g_framebuffer_request.response->framebuffer_count < 1) panic("Broken framebuffer");    // This will be printed on the serial instead.
     if (!g_vga) panic("VGA did not init");
 
     g_vga->write("Welcome to drakos!\n");
