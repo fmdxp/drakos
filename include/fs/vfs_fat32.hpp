@@ -26,9 +26,11 @@ namespace VFS {
 
 // Per-file metadata stored in Node::fs_data
 struct Fat32FileInfo {
-    uint32_t first_cluster; // Starting cluster
-    uint32_t file_size;     // Bytes
-    bool     is_root_dir;   // True if this is the root directory node
+    uint32_t first_cluster;      // Starting cluster
+    uint32_t file_size;          // Bytes
+    bool     is_root_dir;        // True if this is the root directory node
+    uint32_t parent_dir_cluster; // Cluster of the parent directory (for updating dir entries on write)
+    char     name83[13];         // 8.3 Name of this entry
 };
 
 // FAT32 VFS Adapter: wraps a FAT32::FAT32Driver and exposes VFS::FileSystem
@@ -41,6 +43,7 @@ public:
 
     // VFS::FileSystem interface
     Node* lookup(const char* rel_path) override;
+    Node* create(const char* rel_path, bool is_dir) override;
     int   read(Node* node, void* buf, uint32_t offset, uint32_t size) override;
     int   write(Node* node, const void* buf, uint32_t offset, uint32_t size) override;
     bool  listdir(Node* dir, DirEntry* out, uint32_t max, uint32_t& count) override;
@@ -60,7 +63,7 @@ private:
                    uint32_t& out_cluster, uint32_t& out_size, bool& out_is_dir);
 
     // Allocate a Fat32FileInfo via heap (uses pmm_alloc_page)
-    Fat32FileInfo* alloc_info(uint32_t cluster, uint32_t size, bool is_dir);
+    Fat32FileInfo* alloc_info(uint32_t cluster, uint32_t size, bool is_dir, uint32_t parent_dir_cluster);
 };
 
 } // namespace VFS

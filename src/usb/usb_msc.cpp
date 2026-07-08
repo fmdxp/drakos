@@ -73,11 +73,7 @@ bool USBMassStorage::init() {
         char product[17] = {0};
         for (int i = 0; i < 8; i++)  vendor[i]  = (data[8+i] >= 0x20) ? data[8+i] : ' ';
         for (int i = 0; i < 16; i++) product[i] = (data[16+i] >= 0x20) ? data[16+i] : ' ';
-        g_vga->write("USB MSC: INQUIRY -> ");
-        g_vga->write(vendor);
-        g_vga->write(" / ");
-        g_vga->write(product);
-        g_vga->write("\n");
+        // Log rimosso
     }
 
     // TEST UNIT READY (0x00)
@@ -104,18 +100,7 @@ bool USBMassStorage::read_capacity() {
     m_sector_count = (uint64_t)last_lba + 1;
 
     if (g_vga) {
-        g_vga->write("USB MSC: Capacity = ");
-        char buf[12]; int idx = 0;
-        uint32_t v = (uint32_t)(m_sector_count / 2048); // in MB
-        if (v == 0) { buf[idx++] = '0'; }
-        else {
-            int start = idx;
-            while (v) { buf[idx++] = '0' + (v % 10); v /= 10; }
-            for (int a = start, b = idx-1; a < b; a++, b--) { char t=buf[a]; buf[a]=buf[b]; buf[b]=t; }
-        }
-        buf[idx] = 0;
-        g_vga->write(buf);
-        g_vga->write(" MB\n");
+        // Log rimosso
     }
     return true;
 }
@@ -183,8 +168,30 @@ bool USBMassStorage::read_blocks(uint64_t lba, uint32_t count, void* buffer) {
 }
 
 bool USBMassStorage::write_blocks(uint64_t lba, uint32_t count, const void* buffer) {
-    (void)lba; (void)count; (void)buffer;
-    return false; // Not implemented yet
+    // WRITE(10): CDB[0]=0x2A
+    uint8_t cdb[10] = {
+        0x2A,
+        0x00,
+        (uint8_t)(lba >> 24), (uint8_t)(lba >> 16),
+        (uint8_t)(lba >> 8),  (uint8_t)(lba),
+        0x00,
+        (uint8_t)(count >> 8), (uint8_t)(count),
+        0x00
+    };
+
+    uint32_t bytes = count * 512;
+    if (bytes > 4096) bytes = 4096;
+
+    // Copy from user buffer to DMA buffer
+    const uint8_t* src = reinterpret_cast<const uint8_t*>(buffer);
+    uint8_t* dst = reinterpret_cast<uint8_t*>(m_data_phys + pmm_hhdm_offset());
+    for (uint32_t i = 0; i < bytes; i++) dst[i] = src[i];
+
+    // send_scsi with in=false (Bulk OUT)
+    if (!send_scsi(cdb, 10, reinterpret_cast<void*>(m_data_phys), bytes, false))
+        return false;
+
+    return true;
 }
 
 } // namespace USB

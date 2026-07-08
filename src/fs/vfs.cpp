@@ -17,8 +17,9 @@
  */
 
 
-#include "fs/vfs.hpp"
+#include "vfs.hpp"
 #include "vga.hpp"
+#include "panic.hpp"
 
 extern VGA* g_vga;
 
@@ -65,11 +66,6 @@ bool VFSManager::mount(const char* path, FileSystem* fs) {
             vfs_strcpy(m_mounts[i].path, path, 256);
             m_mounts[i].fs   = fs;
             m_mounts[i].used = true;
-            if (g_vga) {
-                g_vga->write("VFS: Mounted ");
-                g_vga->write(path);
-                g_vga->write("\n");
-            }
             return true;
         }
     }
@@ -114,19 +110,19 @@ FileSystem* VFSManager::resolve(const char* path, const char** rel_out) {
     return best_fs;
 }
 
-// ─── open ────────────────────────────────────────────────────────────────────
 int VFSManager::open(const char* path, int flags) {
+    if (flags == 0) flags = VFS_O_READ;
     const char* rel = nullptr;
     FileSystem* fs  = resolve(path, &rel);
-    if (!fs) {
-        if (g_vga) { g_vga->write("VFS: no mount for "); g_vga->write(path); g_vga->write("\n"); }
-        return -1;
-    }
+    if (!fs) return -1;
 
     Node* node = fs->lookup(rel);
     if (!node) {
-        if (g_vga) { g_vga->write("VFS: not found: "); g_vga->write(path); g_vga->write("\n"); }
-        return -1;
+        if (flags & VFS_O_CREATE) {
+            node = fs->create(rel, false);
+            if (!node) return -1;
+        } else return -1;
+        
     }
 
     int fd = alloc_fd();
@@ -142,7 +138,7 @@ int VFSManager::open(const char* path, int flags) {
 // ─── read ────────────────────────────────────────────────────────────────────
 int VFSManager::read(int fd, void* buf, uint32_t size) {
     if (fd < 0 || fd >= MAX_FDS || !m_fds[fd].used) return -1;
-    if (!(m_fds[fd].flags & VFS_O_READ)) return -1;
+    if (!(m_fds[fd].flags & VFS_O_READ) && !(m_fds[fd].flags & VFS_O_WRITE)) return -1;
 
     FileDescriptor& desc = m_fds[fd];
     Node*  node = desc.node;
@@ -163,6 +159,7 @@ int VFSManager::write(int fd, const void* buf, uint32_t size) {
     if (!(m_fds[fd].flags & VFS_O_WRITE)) return -1;
 
     FileDescriptor& desc = m_fds[fd];
+    if (!desc.node->fs) panic("NULL FS in VGS write", nullptr);
     int n = desc.node->fs->write(desc.node, buf, desc.offset, size);
     if (n > 0) desc.offset += (uint32_t)n;
     return n;

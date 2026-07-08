@@ -19,8 +19,11 @@
 
 #include "pci.hpp"
 #include "vga.hpp"
-#include "vmm.hpp"
+#include "xhci.hpp"
+#include "ahci.hpp"
+#include "nvme.hpp"
 #include "pmm.hpp"
+#include "vmm.hpp"
 
 uint32_t PCI::read(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset) {
     uint32_t address = 
@@ -86,16 +89,13 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
             if (is_64bit) {
                 write(bus, device, func, cap_ptr + 8, 0); // Upper 32 bits of address
                 write(bus, device, func, cap_ptr + 12, vector); // Data is the vector
-            } else {
-                write(bus, device, func, cap_ptr + 8, vector); // Data is the vector
-            }
+            } else write(bus, device, func, cap_ptr + 8, vector); // Data is the vector
+            
             
             // Enable MSI (Bit 0 of Message Control)
             msg_ctrl |= 1;
             uint32_t new_header = (cap_header & 0x0000FFFF) | ((uint32_t)msg_ctrl << 16);
             write(bus, device, func, cap_ptr, new_header);
-            
-            if (g_vga) g_vga->write("    -> MSI Configured!\n");
             return true;
         } else if (cap_id == 0x11) { // MSI-X Capability
             uint16_t msg_ctrl = (cap_header >> 16) & 0xFFFF;
@@ -112,9 +112,8 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
             if ((bar_low & 0x06) == 0x04) { // 64-bit BAR
                 uint32_t bar_high = read(bus, device, func, bar_offset + 4);
                 table_phys = (bar_low & 0xFFFFFFF0) | ((uintptr_t)bar_high << 32);
-            } else {
-                table_phys = (bar_low & 0xFFFFFFF0);
-            }
+            } else table_phys = (bar_low & 0xFFFFFFF0);
+            
             
             table_phys += table_offset;
             
@@ -135,8 +134,6 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
             
             uint32_t new_header = (cap_header & 0x0000FFFF) | ((uint32_t)msg_ctrl << 16);
             write(bus, device, func, cap_ptr, new_header);
-            
-            if (g_vga) g_vga->write("    -> MSI-X Configured!\n");
             return true;
         }
         
@@ -178,6 +175,10 @@ void PCI::check_function(uint8_t bus, uint8_t device, uint8_t func) {
     print_device(pci_dev);
 
     // Is this an xHCI Controller?
+    if (class_code == 0x01 && subclass == 0x08 && prog_if == 0x02) {
+        if (g_vga) g_vga->write("PCI: Found NVMe Controller\n");
+        NVMe::init_nvme(pci_dev);
+    }
     if (class_code == 0x0C && subclass == 0x03 && prog_if == 0x30) {
         // Read BAR0 (Offset 0x10) and BAR1 (Offset 0x14) for 64-bit address
         uint32_t bar0 = read(bus, device, func, 0x10);
@@ -199,10 +200,6 @@ void PCI::check_function(uint8_t bus, uint8_t device, uint8_t func) {
         uint32_t cmd = read(bus, device, func, 0x04);
         cmd |= (1 << 2) | (1 << 1);
         write(bus, device, func, 0x04, cmd);
-        
-        // if (g_vga) {
-        //     g_vga->write("  -> xHCI Controller Found and Enabled!\n");
-        // }
     }
 
 
@@ -219,10 +216,6 @@ void PCI::check_function(uint8_t bus, uint8_t device, uint8_t func) {
 
         cmd |= (1 << 10);
         write(bus, device, func, 0x04, cmd);
-
-        if (g_vga) {
-            g_vga->write("  -> AHCI (SATA) Controller Found and Enabled!\n");
-        }
     }
 }
 
@@ -250,10 +243,6 @@ void PCI::check_bus(uint8_t bus) {
 }
 
 bool PCI::start() {
-    // if (g_vga) {
-    //     g_vga->write("Scanning PCI Bus...\n");
-    // }
-    
     // In a full implementation we would check the MCFG table via ACPI.
     // For now, standard Port I/O works well for buses 0-255.
     

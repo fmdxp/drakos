@@ -16,11 +16,11 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-
 #pragma once
+#include <stddef.h>
+#include "panic.hpp"
 
-#include "idt.hpp"
+extern "C" uintptr_t __stack_chk_guard;
 
-// Kernel Panic function
-// Halts the system and displays an error message
-[[noreturn]] void panic(const char* message, InterruptFrame* frame = nullptr);
+extern "C" [[noreturn]] void __stack_chk_fail_local();
+extern "C" [[noreturn]] void __stack_chk_fail();

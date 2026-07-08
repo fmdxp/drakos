@@ -60,17 +60,106 @@ static void test_vfs() {
     } 
     else if (g_vga) g_vga->write("VFS SATA: HELLO.TXT not found\n");
     
+    // Test SATA write back
+    fd1 = vfs_open("/sata/NEW.TXT", VFS_O_CREATE | VFS_O_WRITE);
+    if (fd1 >= 0) {
+        const char* msg = "This file was created by Drakos!\n";
+        g_vga->write("VFS SATA Write: ");
+        int w = vfs_write(fd1, msg, 33);
+        if (w > 0) g_vga->write("Success!\n");
+        else g_vga->write("Failed.\n");
+        vfs_close(fd1);
 
-    // Note: USB testing will only work after USB enumeration completes in the background thread.
-    // The user might see the output interlaced.
+        // Read it back
+        int fd2 = vfs_open("/sata/NEW.TXT", VFS_O_READ);
+        if (fd2 >= 0) {
+            uint8_t* rbuf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
+            vmm_map((uintptr_t)rbuf & ~0xFFFULL, (uintptr_t)rbuf - pmm_hhdm_offset(), VMM_MMIO);
+            int n = vfs_read(fd2, rbuf, 4095);
+            if (n > 0) {
+                rbuf[n] = 0;
+                if (g_vga) { g_vga->write("VFS SATA Read back: "); g_vga->write((const char*)rbuf); g_vga->write("\n"); }
+            }
+            vfs_close(fd2);
+        }
+    }
+
+    // Test NVMe write back
+    int fd_nvme = vfs_open("/nvme/NVME_OUT.TXT", VFS_O_CREATE | VFS_O_WRITE);
+    if (fd_nvme >= 0) {
+        const char* msg = "Hello from NVMe Driver!\n";
+        g_vga->write("VFS NVMe Write: ");
+        int w = vfs_write(fd_nvme, msg, 24);
+        if (w > 0) g_vga->write("Success!\n");
+        else g_vga->write("Failed.\n");
+        vfs_close(fd_nvme);
+
+        // Read it back
+        int fd2_nvme = vfs_open("/nvme/NVME_OUT.TXT", VFS_O_READ);
+        if (fd2_nvme >= 0) {
+            uint8_t* rbuf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
+            int n = vfs_read(fd2_nvme, rbuf, 4095);
+            if (n > 0) {
+                rbuf[n] = 0;
+                if (g_vga) { g_vga->write("VFS NVMe Read back: "); g_vga->write((const char*)rbuf); }
+            } else {
+                if (g_vga) { g_vga->write("VFS NVMe Read back: 0 bytes read!\n"); }
+            }
+            vfs_close(fd2_nvme);
+        } else {
+            if (g_vga) { g_vga->write("VFS NVMe: Failed to open for reading!\n"); }
+        }
+    }
+    
+
+    // Test USB read
+
+    if (g_vga) g_vga->write("Waiting for USB stick to mount...\n");
+    
+    // Wait for USB to mount by checking if we can open a root file or just yield some time
+    bool usb_ready = false;
+    for (int i = 0; i < 200; i++) {
+        int test_fd = vfs_open("/usb/USB.TXT", VFS_O_CREATE | VFS_O_WRITE);
+        if (test_fd >= 0) {
+            usb_ready = true;
+            
+            const char* msg = "Hello from USB Driver!\n";
+            g_vga->write("VFS USB Write: ");
+            int w = vfs_write(test_fd, msg, 23);
+            if (w > 0) g_vga->write("Success!\n");
+            else g_vga->write("Failed.\n");
+            
+            vfs_close(test_fd);
+            break;
+        }
+        scheduler_yield();
+    }
+
+    if (usb_ready) {
+        int fd2 = vfs_open("/usb/USB.TXT", VFS_O_READ);
+        if (fd2 >= 0) {
+            uint8_t* fbuf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
+            
+            int n = vfs_read(fd2, fbuf, 4095);
+            if (n > 0) {
+                fbuf[n] = 0;
+                if (g_vga) { g_vga->write("VFS USB Read back: "); g_vga->write((const char*)fbuf); }
+            } else if (g_vga) { g_vga->write("VFS USB Read back: 0 bytes read!\n"); }
+            
+            vfs_close(fd2);
+        } else if (g_vga) { g_vga->write("VFS USB: Failed to open for reading!\n"); }
+        
+    } 
+    else if (g_vga) g_vga->write("VFS USB: USB enumeration timed out\n");
+    
 }
-
 
 static void make_threads_and_processes()
 {
     Process* usb_proc = new Process();
     g_usb_thread = new Thread(usb_proc, usb_thread_main, false, "USB Controller");
     scheduler_add_thread(g_usb_thread);
+
 
     Process* gamepad_proc = new Process();
     g_gamepad_thread = new Thread(gamepad_proc, gamepad_thread_main, false, "Gamepad Debugger");
@@ -104,8 +193,9 @@ extern "C" [[noreturn]] void kernel_main(void)
 
 
     // Kernel is now initialized!
-    g_vga->write("Welcome to drakos!\n");    
+    g_vga->write("Welcome to drakos!\n");
     test_vfs();
+
     
     
 

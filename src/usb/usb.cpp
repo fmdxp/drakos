@@ -54,12 +54,7 @@ void USBManager::register_device(uint8_t slot_id, XHCI* xhci_controller) {
     scheduler_wake_thread(g_usb_thread);
 
     if (g_vga) {
-        g_vga->write("USB: New Device Registered with Slot ID: ");
-        char buf[2];
-        buf[0] = slot_id + '0';
-        buf[1] = '\0';
-        g_vga->write(buf);
-        g_vga->write("\n");
+        // Log rimosso
     }
 
 
@@ -100,15 +95,7 @@ void USBManager::enumerate_device(uint8_t slot_id, XHCI* xhci) {
     
     if (g_vga) {
         char hex[5];
-        g_vga->write("USB: Found Device! VID: 0x");
-        hex[0] = hex_digit((vid >> 12) & 0xF); hex[1] = hex_digit((vid >> 8) & 0xF);
-        hex[2] = hex_digit((vid >>  4) & 0xF); hex[3] = hex_digit(vid & 0xF); hex[4] = '\0';
-        g_vga->write(hex);
-        g_vga->write(", PID: 0x");
-        hex[0] = hex_digit((pid >> 12) & 0xF); hex[1] = hex_digit((pid >> 8) & 0xF);
-        hex[2] = hex_digit((pid >>  4) & 0xF); hex[3] = hex_digit(pid & 0xF);
-        g_vga->write(hex);
-        g_vga->write("\n");
+        // Log rimosso
     }
     
     // --- Step 2: Configuration Descriptor header (9 bytes) ---
@@ -150,7 +137,7 @@ void USBManager::enumerate_device(uint8_t slot_id, XHCI* xhci) {
             if (intf->bInterfaceClass == 0x08 &&
                 intf->bInterfaceSubClass == 0x06 &&
                 intf->bInterfaceProtocol == 0x50) {
-                if (g_vga) g_vga->write("USB: Mass Storage (SCSI BOT) detected!\n");
+                // Log rimosso
                 
                 // Scan for bulk OUT and bulk IN endpoints
                 uint8_t ep_out = 0, ep_in = 0;

@@ -156,7 +156,10 @@ void VGA::write_char(char c) {
 }
 
 void VGA::write(const char* str) {
-    while (*str) write_char(*str++);
+    while (*str) {
+        if (g_serial) g_serial->write_char(*str);
+        write_char(*str++);
+    }
 }
 
 void VGA::scroll() {

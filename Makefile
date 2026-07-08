@@ -33,10 +33,12 @@ BUILD 		= build
 
 USB_IMG		= usb_stick.img
 DISK_IMG	= disk.img
+NVME_IMG	= nvme.img
 STAGE_DIR 	= stage_disk
 
 USB_IMG_SIZE 	= 64M
 DISK_IMG_SIZE 	= 512M
+NVME_IMG_SIZE 	= 64M
 
 
 SRCS_CPP = $(shell find src -name "*.cpp")
@@ -51,14 +53,14 @@ vpath %.S $(sort $(dir $(SRCS_ASM)))
 
 ## Flags ##
 
-CXXFLAGS = 	-std=c++20 -O2 -Wall -Wextra \
+CXXFLAGS = 	-std=c++20 -O0 -fno-inline -Wall -Wextra \
 			-ffreestanding \
 			-fno-exceptions \
 			-fno-rtti \
 			-mno-red-zone \
 			-mcmodel=kernel \
 			-mgeneral-regs-only \
-			-fno-stack-protector \
+			-fstack-protector-strong \
 			-fno-pic \
 			-nostdlib \
 			-Isrc \
@@ -68,7 +70,8 @@ CXXFLAGS = 	-std=c++20 -O2 -Wall -Wextra \
 			-Iinclude/memory \
 			-Iinclude/fs \
 			-Iinclude/usb \
-			-Iinclude/input
+			-Iinclude/input \
+			-g
 
 LDFLAGS	=	-T linker.ld -nostdlib
 
@@ -81,7 +84,7 @@ all: $(ISO)
 
 $(BUILD)/%.o: %.cpp
 	@mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -include include/kernel/stack.hpp -c $< -o $@
 
 $(BUILD)/%.o: %.S
 	@mkdir -p $(BUILD)
@@ -124,24 +127,34 @@ images:
 		echo "[drakos] DISK image already exists"; \
 	fi
 
+	@if [ ! -f $(NVME_IMG) ]; then \
+		echo "[drakos] Creating NVME image..."; \
+		fallocate -l $(NVME_IMG_SIZE) $(NVME_IMG) || dd if=/dev/zero of=$(NVME_IMG) bs=1M count=64; \
+		mkfs.fat -F 32 $(NVME_IMG); \
+	else \
+		echo "[drakos] NVME image already exists"; \
+	fi
+
 
 seed_disk: images
 	@echo "[drakos] seeding disk..."
-	@rm -rf $(STAGE_DIR)
+	@rm -rf $(STAGE_DIR) || sudo rm -rf $(STAGE_DIR)
 	@mkdir -p $(STAGE_DIR)
 	@echo "Hello from drakos VFS!" > $(STAGE_DIR)/HELLO.TXT
-	@mcopy -i $(DISK_IMG) $(STAGE_DIR)/HELLO.TXT ::/HELLO.TXT
+	@mcopy -o -i $(DISK_IMG) $(STAGE_DIR)/HELLO.TXT ::/HELLO.TXT
+	@echo "This is the USB stick!" > $(STAGE_DIR)/USB.TXT
+	@mcopy -o -i $(USB_IMG) $(STAGE_DIR)/USB.TXT ::/USB.TXT
 	@sync
 	@sleep 0.1
-	@echo "[drakos] disk seeded"
+	@echo "[drakos] disk and usb seeded"
 
 
 
 clean:
-	sudo rm -rf $(BUILD) $(ISO) iso_root $(STAGE_DIR) $(USB_IMG) $(DISK_IMG)
+	sudo rm -rf $(BUILD) $(ISO) iso_root $(STAGE_DIR) $(USB_IMG) $(DISK_IMG) $(NVME_IMG)
 
 
-run: $(ISO) images seed_disk
+run: $(ISO) images
 	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio \
 		-device qemu-xhci,id=xhci \
 		-device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 \
@@ -150,7 +163,9 @@ run: $(ISO) images seed_disk
 		-device usb-storage,bus=xhci.0,drive=usbdisk \
 		-drive id=disk,file=disk.img,if=none,format=raw \
 		-device ahci,id=ahci \
-		-device ide-hd,drive=disk,bus=ahci.0
+		-device ide-hd,drive=disk,bus=ahci.0 \
+		-drive id=nvme0,file=$(NVME_IMG),if=none,format=raw \
+		-device nvme,serial=NVME1234,drive=nvme0
 
 
 debug: $(ISO) images seed_disk
@@ -167,4 +182,6 @@ debug: $(ISO) images seed_disk
 		-drive id=disk,file=$(DISK_IMG),if=none,format=raw \
 		-device ahci,id=ahci \
 		-device ide-hd,drive=disk,bus=ahci.0 \
+		-drive id=nvme0,file=$(NVME_IMG),if=none,format=raw \
+		-device nvme,serial=NVME1234,drive=nvme0 \
 		-s -S

@@ -37,7 +37,7 @@ namespace AHCI {
 #define HBA_PORT_IPM_ACTIVE  1
 
 bool AHCIDriver::start() {
-    if (g_vga) g_vga->write("AHCI: Driver Starting...\n");
+    // Log rimosso
     if (!g_pci) {
         if (g_vga) g_vga->write("AHCI: g_pci is NULL!\n");
         return false;
@@ -67,7 +67,7 @@ bool AHCIDriver::start() {
     // UEFI already initialized the ports and link detection - we just take over
     m_hba->ghc |= (1 << 31);
 
-    if (g_vga) g_vga->write("AHCI: Controller Ready. Scanning SATA Ports...\n");
+    // Log rimosso
 
     uint32_t pi = m_hba->pi;
     for (int i = 0; i < 32; i++) {
@@ -91,15 +91,7 @@ void AHCIDriver::check_port(HBAPort* port, int port_no) {
     if (ipm != HBA_PORT_IPM_ACTIVE) return;
 
     if (port->sig == SATA_SIG_ATA) {
-        if (g_vga) {
-            g_vga->write("AHCI: Found SATA Hard Disk on Port ");
-            char buf[2];
-            buf[0] = '0' + port_no; buf[1] = '\0';
-            g_vga->write(buf);
-            g_vga->write("!\n");
-        }
         port_rebase(port, port_no);
-        if (g_vga) g_vga->write("  -> Port Rebased and Ready!\n");
         
         // Test reading the first sector!
         AHCIDisk* disk = new AHCIDisk(port);
@@ -113,7 +105,7 @@ void AHCIDriver::check_port(HBAPort* port, int port_no) {
         
         if (disk->read_blocks(0, 1, buffer)) {
             if (buffer[510] == 0x55 && buffer[511] == 0xAA) {
-                if (g_vga) g_vga->write("  -> MBR Magic 0x55AA found! Disk read success!\n");
+                // Log rimosso
                 
                 // Mount via VFS as /sata
                 VFS::Fat32FS* vfs_fs = new VFS::Fat32FS(disk);
@@ -130,7 +122,7 @@ void AHCIDriver::check_port(HBAPort* port, int port_no) {
         }
         
     } else if (port->sig == SATA_SIG_ATAPI) {
-        if (g_vga) g_vga->write("AHCI: Found SATAPI CD-ROM\n");
+        // CD / DVD
     }
 }
 
@@ -302,8 +294,84 @@ bool AHCIDisk::read_blocks(uint64_t lba, uint32_t count, void* buffer) {
     return true;
 }
 
-bool AHCIDisk::write_blocks([[maybe_unused]] uint64_t lba, [[maybe_unused]] uint32_t count, [[maybe_unused]] const void* buffer) {
-    return false; // TODO: Implement me
+bool AHCIDisk::write_blocks(uint64_t lba, uint32_t count, const void* buffer) {
+    m_port->is = 0xFFFF; // Clear pending interrupt bits
+    int slot = find_cmdslot();
+    if (slot == -1) return false;
+    
+    uintptr_t clb = m_port->clb | ((uintptr_t)m_port->clbu << 32);
+    HBACommandHeader* cmdheader = reinterpret_cast<HBACommandHeader*>(clb + pmm_hhdm_offset());
+    
+    cmdheader[slot].cfl = sizeof(FIS_REG_H2D)/sizeof(uint32_t); // Command FIS size
+    cmdheader[slot].w = 1; // Write
+    cmdheader[slot].prdtl = (uint16_t)((count - 1) >> 4) + 1; // PRDT entries count
+    
+    uintptr_t ctba = cmdheader[slot].ctba | ((uintptr_t)cmdheader[slot].ctbau << 32);
+    HBACommandTable* cmdtbl = reinterpret_cast<HBACommandTable*>(ctba + pmm_hhdm_offset());
+    
+    for (int i = 0; i < 8192; i++) ((uint8_t*)cmdtbl)[i] = 0;
+    
+    // 8K bytes (16 sectors) per PRDT
+    int prdtl = cmdheader[slot].prdtl;
+    uintptr_t buf_phys = (uintptr_t)buffer - pmm_hhdm_offset(); // Convert virt to phys
+    for (int i = 0; i < prdtl - 1; i++) {
+        cmdtbl->prdt_entry[i].dba = (uint32_t)buf_phys;
+        cmdtbl->prdt_entry[i].dbau = (uint32_t)(buf_phys >> 32);
+        cmdtbl->prdt_entry[i].dbc = 8192 - 1; // 8K bytes
+        cmdtbl->prdt_entry[i].i = 0;
+        buf_phys += 8192;
+        count -= 16; 
+    }
+    
+    cmdtbl->prdt_entry[prdtl-1].dba = (uint32_t)buf_phys;
+    cmdtbl->prdt_entry[prdtl-1].dbau = (uint32_t)(buf_phys >> 32);
+    cmdtbl->prdt_entry[prdtl-1].dbc = (count * 512) - 1; 
+    cmdtbl->prdt_entry[prdtl-1].i = 0; // No interrupt
+    
+    // Setup command
+    FIS_REG_H2D* cmdfis = (FIS_REG_H2D*)(&cmdtbl->cfis);
+    
+    cmdfis->fis_type = 0x27; // FIS_TYPE_REG_H2D
+    cmdfis->c = 1; // Command
+    cmdfis->command = 0x35; // ATA_CMD_WRITE_DMA_EX
+    
+    cmdfis->lba0 = (uint8_t)lba;
+    cmdfis->lba1 = (uint8_t)(lba >> 8);
+    cmdfis->lba2 = (uint8_t)(lba >> 16);
+    cmdfis->device = 1 << 6; // LBA mode
+    
+    cmdfis->lba3 = (uint8_t)(lba >> 24);
+    cmdfis->lba4 = (uint8_t)(lba >> 32);
+    cmdfis->lba5 = (uint8_t)(lba >> 40);
+    
+    cmdfis->countl = count & 0xFF;
+    cmdfis->counth = (count >> 8) & 0xFF;
+    
+    // Wait for port
+    int spin = 0; 
+    while ((m_port->tfd & (0x80 | 0x08)) && spin < 1000000) spin++;
+    if (spin == 1000000) return false;
+    
+    m_port->ci = 1 << slot; 
+    
+    // Wait for completion
+    int timeout = 0;
+    while (1) {
+        if ((m_port->ci & (1 << slot)) == 0) break;
+        if (m_port->is & (1 << 30)) {
+            if (g_vga) g_vga->write("AHCIDisk: Write Task file error!\n");
+            return false; // Task file error
+        }
+        timeout++;
+        if (timeout > 10000000) {
+            if (g_vga) {
+                g_vga->write("AHCIDisk: WRITE TIMEOUT!\n");
+            }
+            return false;
+        }
+    }
+    
+    return true;
 }
 
 } // namespace AHCI

@@ -16,11 +16,14 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "stack.hpp"
 
-#pragma once
+extern "C" uintptr_t __stack_chk_guard = 0xDEADBEEFCAFEBABEULL;
 
-#include "idt.hpp"
+extern "C" [[noreturn]] void __stack_chk_fail_local() {
+    __stack_chk_fail();
+}
 
-// Kernel Panic function
-// Halts the system and displays an error message
-[[noreturn]] void panic(const char* message, InterruptFrame* frame = nullptr);
+extern "C" [[noreturn]] void __stack_chk_fail() {
+    panic("Stack smashing detected");
+}

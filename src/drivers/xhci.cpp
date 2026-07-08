@@ -126,7 +126,6 @@ bool XHCI::reset_controller() {
         // Spin
     }
 
-    if (g_vga) g_vga->write("xHCI: Controller Reset Complete.\n");
     return true;
 }
 
@@ -160,7 +159,6 @@ bool XHCI::initialize_data_structures() {
     // CRCR bit 0 is RCS (Ring Cycle State)
     write64(op_base + XHCI_CRCR, m_cmd_ring_phys | 1);
 
-    if (g_vga) g_vga->write("xHCI: Data structures allocated.\n");
     return true;
 }
 
@@ -210,7 +208,6 @@ bool XHCI::start_controller() {
         // Spin
     }
 
-    if (g_vga) g_vga->write("xHCI: Controller is RUNNING.\n");
     return true;
 }
 
@@ -223,21 +220,6 @@ void XHCI::enumerate_ports() {
         
         // Bit 0 is CCS (Current Connect Status)
         if (portsc & PORTSC_CCS) {
-            if (g_vga) {
-                g_vga->write("xHCI: Device DETECTED on Port ");
-                char buf[3];
-                buf[0] = (i / 10) + '0';
-                buf[1] = (i % 10) + '0';
-                if (buf[0] == '0') {
-                    buf[0] = buf[1];
-                    buf[1] = '\0';
-                } else {
-                    buf[2] = '\0';
-                }
-                g_vga->write(buf);
-                g_vga->write("!\n");
-            }
-            
             // Reset the port to negotiate speed and start enumeration
             m_port_setup_complete = false;
             reset_port(i);
@@ -277,15 +259,6 @@ void XHCI::reset_port(uint32_t port_num) {
     portsc = read32(portsc_offset);
     m_current_port_speed = (portsc >> 10) & 0xF;
     m_current_port_num = port_num;
-    
-    if (g_vga) {
-        g_vga->write("xHCI: Port Reset Complete. Speed: ");
-        char buf[2];
-        buf[0] = m_current_port_speed + '0';
-        buf[1] = '\0';
-        g_vga->write(buf);
-        g_vga->write(" Issuing Enable Slot...\n");
-    }
     
     // Send Enable Slot Command
     TRB cmd {};
@@ -348,11 +321,7 @@ bool XHCI::start() {
 
     // Configure MSI (Route to Vector 40)
     PCIDevice pci_dev = g_pci->get_xhci_device();
-    if (!g_pci->configure_msi(pci_dev.bus, pci_dev.device, pci_dev.function, 40)) {
-        if (g_vga) g_vga->write("xHCI: Failed to configure MSI!\n");
-        return false;
-    }
-
+    if (!g_pci->configure_msi(pci_dev.bus, pci_dev.device, pci_dev.function, 40)) return false;
     if (!start_controller()) return false;
 
     // Detect connected devices immediately after starting
@@ -369,8 +338,6 @@ const char* XHCI::get_name() const {
 }
 
 void XHCI::configure_slot(uint32_t slot_id, uint32_t port_speed, uint32_t port_num) {
-    if (g_vga) g_vga->write("xHCI: Configuring Contexts and Sending Address Device...\n");
-
     // Get Context Size from HCCPARAMS1 (Bit 2)
     uint32_t hccparams1 = read32(0x10);
     bool csz = (hccparams1 & (1 << 2)) != 0;
@@ -526,8 +493,6 @@ bool XHCI::configure_endpoint(uint32_t slot_id, uint8_t ep_num, uint8_t ep_type,
     while (!m_transfer_complete) {
         asm volatile("pause");
     }
-    
-    if (g_vga) g_vga->write("xHCI: Interrupt Endpoint Configured!\n");
     return true;
 }
 
@@ -751,25 +716,12 @@ void XHCI::poll_event_ring() {
             TRB* cmd_ring = reinterpret_cast<TRB*>(m_cmd_ring_phys + pmm_hhdm_offset());
             uint32_t cmd_type = (cmd_ring[cmd_trb_offset / sizeof(TRB)].control >> 10) & 0x3F;
             
-            if (g_vga) {
-                g_vga->write("xHCI: Command Completed. Code: ");
-                char buf[3];
-                buf[0] = (cmd_completion_code / 10) + '0';
-                buf[1] = (cmd_completion_code % 10) + '0';
-                buf[2] = '\0';
-                g_vga->write(buf);
-                g_vga->write(" Slot ID: ");
-                buf[0] = slot_id + '0';
-                buf[1] = '\0';
-                g_vga->write(buf);
-                g_vga->write("\n");
-            }
+            // Removed verbose log
             
             if (cmd_completion_code == 1 && slot_id > 0) {
                 if (cmd_type == TRB_CMD_ENABLE_SLOT) {
                     configure_slot(slot_id, m_current_port_speed, m_current_port_num);
                 } else if (cmd_type == TRB_CMD_ADDRESS_DEVICE) {
-                    if (g_vga) g_vga->write("xHCI: Device Addressed Successfully! USB setup complete!\n");
                     if (g_usb_manager) g_usb_manager->register_device(slot_id, this);
                     m_port_setup_complete = true;
                 } else if (cmd_type == 12) { // Configure Endpoint
@@ -787,38 +739,6 @@ void XHCI::poll_event_ring() {
             uint32_t residual = current_event.status & 0xFFFFFF;
             
             if (ep_id > 1) {
-                static int evt_prints = 0;
-                if (g_vga && evt_prints < 10) {
-                    g_vga->write("xHCI: Transfer Event on EP ");
-                    char buf[3];
-                    buf[0] = ep_id + '0';
-                    buf[1] = '\0';
-                    if (ep_id > 9) {
-                        buf[0] = (ep_id / 10) + '0';
-                        buf[1] = (ep_id % 10) + '0';
-                        buf[2] = '\0';
-                    }
-                    g_vga->write(buf);
-                    g_vga->write(" Code: ");
-                    buf[0] = (completion_code / 10) + '0';
-                    buf[1] = (completion_code % 10) + '0';
-                    buf[2] = '\0';
-                    g_vga->write(buf);
-                    g_vga->write(" Resid: ");
-                    
-                    // Print residual length
-                    char res_buf[10];
-                    int idx = 0;
-                    uint32_t temp = residual;
-                    if (temp == 0) { res_buf[idx++] = '0'; }
-                    while (temp > 0) { res_buf[idx++] = (temp % 10) + '0'; temp /= 10; }
-                    for (int i = 0; i < idx / 2; i++) { char t = res_buf[i]; res_buf[i] = res_buf[idx - 1 - i]; res_buf[idx - 1 - i] = t; }
-                    res_buf[idx] = '\0';
-                    g_vga->write(res_buf);
-                    g_vga->write("\n");
-                    
-                    evt_prints++;
-                }
                 if (g_dualsense_driver) {
                     g_dualsense_driver->on_report_received();
                 }
@@ -829,7 +749,7 @@ void XHCI::poll_event_ring() {
                 m_transfer_complete = true;
             }
         } else if (trb_type == TRB_EVENT_PORT_STATUS) {
-            if (g_vga) g_vga->write("xHCI: Port Status Change Event Received.\n");
+            // Port Status Change Event Received
         }
     }
 }

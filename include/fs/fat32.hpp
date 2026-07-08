@@ -107,7 +107,16 @@ public:
     // Returns bytes read or -1 on error.
     int  read_at(uint32_t first_cluster, uint32_t file_size,
                  void* buf, uint32_t offset, uint32_t size);
+    // Write 'size' bytes to a file at byte 'offset', given its first cluster.
+    // If the file needs to grow, it allocates new clusters and updates the dir entry.
+    // Returns bytes written or -1 on error.
+    int  write_at(uint32_t first_cluster, uint32_t file_size,
+                  const void* buf, uint32_t offset, uint32_t size,
+                  uint32_t dir_cluster, const char* name83);
 
+    // Create a new file or directory entry in the specified directory.
+    // Returns true on success and outputs the allocated starting cluster.
+    bool create_entry(uint32_t dir_cluster, const char* name83, bool is_dir, uint32_t& out_cluster);
     struct DirEnum { char name[13]; bool is_dir; uint32_t size; };
 
     // Enumerate directory contents (one cluster page at a time).
@@ -132,6 +141,13 @@ private:
     uint32_t next_cluster(uint32_t cluster);
     bool read_cluster(uint32_t cluster, void* buf);
     bool read_sectors(uint64_t lba, uint32_t count, void* buf);
+    
+    // Write support
+    bool write_sectors(uint64_t lba, uint32_t count, const void* buf);
+    bool write_cluster(uint32_t cluster, const void* buf);
+    bool write_fat_entry(uint32_t cluster, uint32_t value);
+    uint32_t allocate_cluster(uint32_t last_cluster);
+    bool update_dir_entry(uint32_t dir_cluster, const char* name83, uint32_t new_size, uint32_t new_first_cluster);
     
     // Simple string compare for 8.3 names
     bool match_83(const DirEntry* entry, const char* name);

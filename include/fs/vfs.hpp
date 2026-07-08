@@ -60,6 +60,9 @@ public:
     // List directory entries
     virtual bool listdir(Node* dir, DirEntry* out, uint32_t max, uint32_t& count) = 0;
 
+    // Create a new file or directory at the given path
+    virtual Node* create(const char* rel_path, bool is_dir) = 0;
+
     // Free node resources
     virtual void release(Node* node) = 0;
 };
