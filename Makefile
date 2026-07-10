@@ -53,7 +53,7 @@ vpath %.S $(sort $(dir $(SRCS_ASM)))
 
 ## Flags ##
 
-CXXFLAGS = 	-std=c++20 -O0 -fno-inline -Wall -Wextra \
+CXXFLAGS = 	-std=c++20 -O2 -Wall -Wextra \
 			-ffreestanding \
 			-fno-exceptions \
 			-fno-rtti \
@@ -71,6 +71,7 @@ CXXFLAGS = 	-std=c++20 -O0 -fno-inline -Wall -Wextra \
 			-Iinclude/fs \
 			-Iinclude/usb \
 			-Iinclude/input \
+			-Iinclude/drk \
 			-g
 
 LDFLAGS	=	-T linker.ld -nostdlib
