@@ -1,13 +1,11 @@
-#include "../../include/drk/elf.hpp"
-#include <fs/vfs.hpp>
-#include <kernel/elf.hpp>
-#include <kernel/thread.hpp>
-#include <kernel/panic.hpp>
-#include <memory/pmm.hpp>
-#include <memory/vmm.hpp>
-
-// Assuming g_vga is available for debugging (optional)
-#include <drivers/vga.hpp>
+#include "drk.hpp"
+#include "vfs.hpp"
+#include "elf.hpp"
+#include "thread.hpp"
+#include "panic.hpp"
+#include "pmm.hpp"
+#include "vmm.hpp"
+#include "vga.hpp"
 
 using namespace DRK;
 

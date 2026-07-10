@@ -40,7 +40,9 @@
 
 #include "syscalls.hpp"
 #include "cpu.hpp"
-#include "../include/drk/elf.hpp"
+
+#include "elf.hpp"
+#include "drk.hpp"
 
 
 static void make_threads_and_processes()
@@ -58,9 +60,8 @@ static void make_threads_and_processes()
     DRK::DrkLoader* loader = new DRK::DrkLoader();
     if (loader->load("/nvme/hello.drk")) {
         if (g_vga) g_vga->write("Successfully loaded hello.drk!\n");
-    } else {
-        if (g_vga) g_vga->write("Failed to load hello.drk.\n");
-    }
+    } else if (g_vga) g_vga->write("Failed to load hello.drk.\n");
+    
 
     g_kernel_thread = scheduler_get_current_thread();
 }
