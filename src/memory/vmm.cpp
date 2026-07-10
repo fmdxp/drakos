@@ -100,9 +100,9 @@ static uintptr_t get_next_level(uintptr_t table_phys, uint32_t index, bool alloc
 // PUBLIC API IMPLEMENTATION
 // -------------------------------------------------------------------
 
-void vmm_map(uintptr_t virt, uintptr_t phys, uint64_t flags) {
+void vmm_map_page(uintptr_t pml4_phys, uintptr_t virt, uintptr_t phys, uint64_t flags) {
     // Get PDPT from PML4, allocate if missing
-    uintptr_t pdpt = get_next_level(s_kernel_pml4, PML4_INDEX(virt), true);
+    uintptr_t pdpt = get_next_level(pml4_phys, PML4_INDEX(virt), true);
     if (!pdpt) return; // OOM
 
     // Get PD from PDPT, allocate if missing
@@ -117,8 +117,52 @@ void vmm_map(uintptr_t virt, uintptr_t phys, uint64_t flags) {
     PageTable* pt = reinterpret_cast<PageTable*>(pt_phys + pmm_hhdm_offset());
     pt->entries[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | flags;
 
-    // Flush the TLB entry for this virtual address
-    invlpg(virt);
+    // Flush the TLB entry if we modified the active address space
+    if (pml4_phys == read_cr3()) {
+        invlpg(virt);
+    }
+}
+
+void vmm_map(uintptr_t virt, uintptr_t phys, uint64_t flags) {
+    vmm_map_page(read_cr3(), virt, phys, flags);
+}
+
+uintptr_t vmm_create_address_space() {
+    uintptr_t new_pml4 = pmm_alloc_page();
+    if (!new_pml4) return 0;
+    
+    PageTable* pt = reinterpret_cast<PageTable*>(new_pml4 + pmm_hhdm_offset());
+    for (int i = 0; i < 256; i++) pt->entries[i] = 0;
+    
+    // Copy kernel space (Higher Half)
+    PageTable* kernel_pt = reinterpret_cast<PageTable*>(s_kernel_pml4 + pmm_hhdm_offset());
+    for (int i = 256; i < 512; i++) {
+        pt->entries[i] = kernel_pt->entries[i];
+    }
+    
+    return new_pml4;
+}
+
+void vmm_switch_address_space(uintptr_t pml4_phys) {
+    if (pml4_phys == s_kernel_pml4) {
+        write_cr3(pml4_phys);
+        return;
+    }
+
+    // Always sync kernel Higher Half (256-511) from the master kernel PML4
+    // before switching. This ensures any heap pages allocated after the
+    // process address space was created are visible in this new space.
+    PageTable* dst = reinterpret_cast<PageTable*>(pml4_phys  + pmm_hhdm_offset());
+    PageTable* src = reinterpret_cast<PageTable*>(s_kernel_pml4 + pmm_hhdm_offset());
+    for (int i = 256; i < 512; i++) {
+        dst->entries[i] = src->entries[i];
+    }
+
+    write_cr3(pml4_phys);
+}
+
+uintptr_t vmm_get_kernel_pml4() {
+    return s_kernel_pml4;
 }
 
 void vmm_unmap(uintptr_t virt) {

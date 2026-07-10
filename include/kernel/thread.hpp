@@ -45,6 +45,9 @@ public:
     // Physical page table (PML4 or PML5) assigned to this process
     uintptr_t page_table_phys;
 
+    // Process is user-mode process?
+    bool is_user;
+
     // TODO: Zircon-style Handle Table for Capabilities
 };
 

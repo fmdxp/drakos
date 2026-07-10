@@ -59,8 +59,8 @@ struct LargeAllocHeader {
 // VIRTUAL HEAP BASE
 // -------------------------------------------------------------------
 // We map heap pages starting at a high virtual address.
-static uintptr_t s_heap_virt_base = 0xFFFF900000000000ULL;
-static uintptr_t s_heap_virt_curr = s_heap_virt_base;
+static constexpr uintptr_t HEAP_VIRT_BASE = 0xFFFF900000000000ULL;
+static uintptr_t s_heap_virt_curr = HEAP_VIRT_BASE;
 
 // -------------------------------------------------------------------
 // INTERNAL HELPERS

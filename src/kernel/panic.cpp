@@ -23,6 +23,7 @@
 
 // Helper to write to both VGA and Serial
 static void panic_print(const char* str) {
+    
     if (g_vga) g_vga->write(str);
     if (g_serial) g_serial->write(str);
 }
@@ -39,9 +40,17 @@ static void panic_print_hex(uint64_t val, int digits) {
     }
 }
 
+static volatile int s_panic_lock = 0;
+
 [[noreturn]] void panic(const char* message, InterruptFrame* frame) {
-    // Disable interrupts to prevent nested panics
+    // Disable interrupts immediately
     asm volatile("cli");
+
+    // Spin-acquire the panic lock.
+    // If another CPU already panicked, just halt — don't print twice.
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&s_panic_lock, &expected, 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) while (true) asm volatile("hlt");
+    
 
     panic_print("\n\n=======================================\n");
     panic_print("             KERNEL PANIC\n");
@@ -59,6 +68,11 @@ static void panic_print_hex(uint64_t val, int digits) {
         panic_print("  SS: "); panic_print_hex(frame->ss, 4); panic_print("\n");
         
         panic_print("RFLAGS: "); panic_print_hex(frame->rflags, 16); panic_print("\n");
+        
+        // Print CR2 (faulting address) — invaluable for page faults
+        uint64_t cr2;
+        asm volatile("mov %%cr2, %0" : "=r"(cr2));
+        panic_print("CR2 (fault addr): "); panic_print_hex(cr2, 16); panic_print("\n");
         panic_print("----------------------\n");
     }
 

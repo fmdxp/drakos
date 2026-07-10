@@ -40,119 +40,8 @@
 
 #include "syscalls.hpp"
 #include "cpu.hpp"
+#include "../include/drk/elf.hpp"
 
-
-static void test_vfs() {
-    if (g_vga) g_vga->write("\n--- Testing VFS ---\n");
-    
-    // Test SATA read
-    int fd1 = vfs_open("/sata/HELLO.TXT");
-    if (fd1 >= 0) {
-        uint8_t* fbuf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-        vmm_map((uintptr_t)fbuf & ~0xFFFULL, (uintptr_t)fbuf - pmm_hhdm_offset(), VMM_MMIO);
-        
-        int n = vfs_read(fd1, fbuf, 4095);
-        if (n > 0) {
-            fbuf[n] = 0;
-            if (g_vga) { g_vga->write("VFS SATA Read: "); g_vga->write((const char*)fbuf); g_vga->write("\n"); }
-        }
-        vfs_close(fd1);
-    } 
-    else if (g_vga) g_vga->write("VFS SATA: HELLO.TXT not found\n");
-    
-    // Test SATA write back
-    fd1 = vfs_open("/sata/NEW.TXT", VFS_O_CREATE | VFS_O_WRITE);
-    if (fd1 >= 0) {
-        const char* msg = "This file was created by Drakos!\n";
-        g_vga->write("VFS SATA Write: ");
-        int w = vfs_write(fd1, msg, 33);
-        if (w > 0) g_vga->write("Success!\n");
-        else g_vga->write("Failed.\n");
-        vfs_close(fd1);
-
-        // Read it back
-        int fd2 = vfs_open("/sata/NEW.TXT", VFS_O_READ);
-        if (fd2 >= 0) {
-            uint8_t* rbuf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-            vmm_map((uintptr_t)rbuf & ~0xFFFULL, (uintptr_t)rbuf - pmm_hhdm_offset(), VMM_MMIO);
-            int n = vfs_read(fd2, rbuf, 4095);
-            if (n > 0) {
-                rbuf[n] = 0;
-                if (g_vga) { g_vga->write("VFS SATA Read back: "); g_vga->write((const char*)rbuf); g_vga->write("\n"); }
-            }
-            vfs_close(fd2);
-        }
-    }
-
-    // Test NVMe write back
-    int fd_nvme = vfs_open("/nvme/NVME_OUT.TXT", VFS_O_CREATE | VFS_O_WRITE);
-    if (fd_nvme >= 0) {
-        const char* msg = "Hello from NVMe Driver!\n";
-        g_vga->write("VFS NVMe Write: ");
-        int w = vfs_write(fd_nvme, msg, 24);
-        if (w > 0) g_vga->write("Success!\n");
-        else g_vga->write("Failed.\n");
-        vfs_close(fd_nvme);
-
-        // Read it back
-        int fd2_nvme = vfs_open("/nvme/NVME_OUT.TXT", VFS_O_READ);
-        if (fd2_nvme >= 0) {
-            uint8_t* rbuf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-            int n = vfs_read(fd2_nvme, rbuf, 4095);
-            if (n > 0) {
-                rbuf[n] = 0;
-                if (g_vga) { g_vga->write("VFS NVMe Read back: "); g_vga->write((const char*)rbuf); }
-            } else {
-                if (g_vga) { g_vga->write("VFS NVMe Read back: 0 bytes read!\n"); }
-            }
-            vfs_close(fd2_nvme);
-        } else {
-            if (g_vga) { g_vga->write("VFS NVMe: Failed to open for reading!\n"); }
-        }
-    }
-    
-
-    // Test USB read
-
-    if (g_vga) g_vga->write("Waiting for USB stick to mount...\n");
-    
-    // Wait for USB to mount by checking if we can open a root file or just yield some time
-    bool usb_ready = false;
-    for (int i = 0; i < 200; i++) {
-        int test_fd = vfs_open("/usb/USB.TXT", VFS_O_CREATE | VFS_O_WRITE);
-        if (test_fd >= 0) {
-            usb_ready = true;
-            
-            const char* msg = "Hello from USB Driver!\n";
-            g_vga->write("VFS USB Write: ");
-            int w = vfs_write(test_fd, msg, 23);
-            if (w > 0) g_vga->write("Success!\n");
-            else g_vga->write("Failed.\n");
-            
-            vfs_close(test_fd);
-            break;
-        }
-        scheduler_yield();
-    }
-
-    if (usb_ready) {
-        int fd2 = vfs_open("/usb/USB.TXT", VFS_O_READ);
-        if (fd2 >= 0) {
-            uint8_t* fbuf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-            
-            int n = vfs_read(fd2, fbuf, 4095);
-            if (n > 0) {
-                fbuf[n] = 0;
-                if (g_vga) { g_vga->write("VFS USB Read back: "); g_vga->write((const char*)fbuf); }
-            } else if (g_vga) { g_vga->write("VFS USB Read back: 0 bytes read!\n"); }
-            
-            vfs_close(fd2);
-        } else if (g_vga) { g_vga->write("VFS USB: Failed to open for reading!\n"); }
-        
-    } 
-    else if (g_vga) g_vga->write("VFS USB: USB enumeration timed out\n");
-    
-}
 
 static void make_threads_and_processes()
 {
@@ -165,12 +54,23 @@ static void make_threads_and_processes()
     g_gamepad_thread = new Thread(gamepad_proc, gamepad_thread_main, false, "Gamepad Debugger");
     scheduler_add_thread(g_gamepad_thread);
 
+    // --- Ring 3 App Loader ---
+    DRK::DrkLoader* loader = new DRK::DrkLoader();
+    if (loader->load("/nvme/hello.drk")) {
+        if (g_vga) g_vga->write("Successfully loaded hello.drk!\n");
+    } else {
+        if (g_vga) g_vga->write("Failed to load hello.drk.\n");
+    }
+
     g_kernel_thread = scheduler_get_current_thread();
 }
 
 
 extern "C" [[noreturn]] void kernel_main(void)
 {
+    // 0. Call C++ global constructors BEFORE anything else!    (i actually forgot in older commits...)
+    cpp_call_constructors();
+
     // 1. Initialize base hardware and VGA, so we can see output
     system_init_modules();
     
@@ -194,7 +94,7 @@ extern "C" [[noreturn]] void kernel_main(void)
 
     // Kernel is now initialized!
     g_vga->write("Welcome to drakos!\n");
-    test_vfs();
+    // test_vfs();
 
     
     

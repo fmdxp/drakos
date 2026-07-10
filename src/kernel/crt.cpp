@@ -63,3 +63,28 @@ size_t strlen(const char* s) {
 }
 
 } // extern "C"
+
+extern "C" {
+    // Array of function pointers for global constructors
+    typedef void (*constructor_t)();
+    extern constructor_t __init_array_start[];
+    extern constructor_t __init_array_end[];
+
+    // Array of function pointers for global destructors
+    typedef void (*destructor_t)();
+    extern destructor_t __fini_array_start[];
+    extern destructor_t __fini_array_end[];
+}
+
+void cpp_call_constructors() {
+    for (constructor_t* ctor = __init_array_start; ctor < __init_array_end; ++ctor) {
+        (*ctor)();
+    }
+}
+
+void cpp_call_destructors() {
+    // Note: destructors are called in reverse order
+    for (destructor_t* dtor = __fini_array_end - 1; dtor >= __fini_array_start; --dtor) {
+        (*dtor)();
+    }
+}

@@ -22,33 +22,33 @@
 #include <stdint.h>
 #include <cpuid.h>
 
-// Enable AVX/AVX512 and XSAVE support dynamically based on CPUID
+// Enable FPU/SSE/AVX support dynamically based on CPUID.
+// NOTE: We deliberately limit XCR0 to x87 + SSE + AVX (bits 0,1,2).
+// AVX-512 (bits 5,6,7) and AMX (bits 17,18) would push the XSAVE area
+// well beyond our FPU_STATE_SIZE (4096 bytes) inside each Thread struct,
+// corrupting adjacent memory. Limit to 832 bytes max (512 legacy + 64 header + 256 AVX).
 void enable_fpu_and_avx() {
     uint32_t eax, ebx, ecx, edx;
 
     if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return;
 
-    // enable SSE base
+    // Enable SSE base (OSFXSR, OSXMMEXCPT)
     uint64_t cr4;
     asm volatile("mov %%cr4, %0" : "=r"(cr4));
     cr4 |= (1 << 9);   // OSFXSR
     cr4 |= (1 << 10);  // OSXMMEXCPT
-    cr4 |= (1 << 18);  // OSXSAVE
+    cr4 |= (1 << 18);  // OSXSAVE (needed for xsave64/xrstor64)
     asm volatile("mov %0, %%cr4" : : "r"(cr4));
 
-    // check XSAVE + AVX capability
     bool has_xsave = ecx & (1 << 26);
     bool has_avx   = ecx & (1 << 28);
 
-    uint64_t xcr0 = (1 << 0) | (1 << 1); // x87 + SSE
-
     if (has_xsave) {
-        if (has_avx) xcr0 |= (1 << 2);
-
-        if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) &&
-            (ebx & (1 << 16))) {
-            xcr0 |= (1ULL << 5) | (1ULL << 6) | (1ULL << 7);
-        }
+        // ONLY enable: bit 0 (x87), bit 1 (SSE), bit 2 (AVX if available)
+        // Do NOT enable AVX-512 (bits 5,6,7), AMX (bits 17,18) or anything else
+        // as their XSAVE components would exceed our 4096-byte fpu_state buffer.
+        uint64_t xcr0 = (1ULL << 0) | (1ULL << 1); // x87 + SSE always
+        if (has_avx) xcr0 |= (1ULL << 2);           // AVX optional
 
         asm volatile("xsetbv"
             :

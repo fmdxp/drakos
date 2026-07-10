@@ -22,6 +22,10 @@
 #include "panic.hpp"
 #include "thread.hpp" // for Context
 
+extern Thread* scheduler_get_current_thread();
+extern void scheduler_block_current_thread();
+extern void lapic_eoi();
+
 // External assembly stubs
 extern "C" void isr_0();
 extern "C" void isr_1();
@@ -63,7 +67,33 @@ extern "C" void isr_40();
 // The central C++ interrupt handler called by isr_stubs.S
 extern "C" void isr_handler(Context* ctx) {
     if (ctx->int_no < 32) {
-        // Exception
+        // Exception — check if it came from Ring 3 (CPL=3)
+        bool from_user = (ctx->cs & 3) == 3;
+        
+        if (from_user) {
+            // Don't crash the kernel! Kill the offending thread.
+            if (g_vga) {
+                g_vga->write("\n[Ring3 Fault #");
+                char buf[16];
+                int n = ctx->int_no;
+                int i = 0;
+                if (n == 0) buf[i++] = '0';
+                while(n > 0) { buf[i++] = (n % 10) + '0'; n /= 10; }
+                for(int j=0; j<i/2; j++) { char t=buf[j]; buf[j]=buf[i-1-j]; buf[i-1-j]=t; }
+                buf[i] = '\0';
+                g_vga->write(buf);
+                g_vga->write("] Thread killed.\n");
+            }
+            // Block the faulting thread so scheduler won't schedule it again
+            Thread* t = scheduler_get_current_thread();
+            if (t) t->state = THREAD_DEAD;
+            // EOI so APIC doesn't lock up, then yield to next thread
+            lapic_eoi();
+            scheduler_block_current_thread();
+            return; // unreachable, but safe
+        }
+        
+        // Kernel-mode exception — full panic
         if (g_vga) {
             g_vga->write("\nException Number: ");
             char buf[16];

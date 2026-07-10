@@ -42,9 +42,21 @@
 // VMM PUBLIC API
 // -------------------------------------------------------------------
 
-// Map a virtual address to a physical address with the given flags.
+// Map a virtual address to a physical address with the given flags in the CURRENT address space.
 // Creates intermediate page table levels as needed (uses PMM internally).
 void vmm_map(uintptr_t virt, uintptr_t phys, uint64_t flags);
+
+// Map a virtual address to a physical address in a SPECIFIC address space (PML4).
+void vmm_map_page(uintptr_t pml4_phys, uintptr_t virt, uintptr_t phys, uint64_t flags);
+
+// Create a new address space (returns physical address of new PML4)
+uintptr_t vmm_create_address_space();
+
+// Switch to a new address space
+void vmm_switch_address_space(uintptr_t pml4_phys);
+
+// Return the kernel master PML4 physical address
+uintptr_t vmm_get_kernel_pml4();
 
 // Remove the mapping for a virtual address and flush the TLB entry.
 void vmm_unmap(uintptr_t virt);

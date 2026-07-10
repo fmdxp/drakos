@@ -37,6 +37,29 @@ static inline uint32_t inl(uint16_t port) {
 #define PCI_CONFIG_ADDRESS  0xCF8
 #define PCI_CONFIG_DATA     0xCFC
 
+// Free helper functions — safe to call before g_pci is initialized
+static inline uint32_t pci_read_raw(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset) {
+    uint32_t address =
+        (1 << 31) |
+        (bus << 16) |
+        ((device & 0x1F) << 11) |
+        ((func & 0x07) << 8) |
+        (offset & 0xFC);
+    outl(PCI_CONFIG_ADDRESS, address);
+    return inl(PCI_CONFIG_DATA);
+}
+
+static inline void pci_write_raw(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset, uint32_t value) {
+    uint32_t address =
+        (1 << 31) |
+        (bus << 16) |
+        ((device & 0x1F) << 11) |
+        ((func & 0x07) << 8) |
+        (offset & 0xFC);
+    outl(PCI_CONFIG_ADDRESS, address);
+    outl(PCI_CONFIG_DATA, value);
+}
+
 struct PCIDevice {
     uint8_t bus;
     uint8_t device;

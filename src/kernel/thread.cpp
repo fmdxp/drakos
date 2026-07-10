@@ -18,7 +18,12 @@
 
 
 #include "thread.hpp"
+#include "vmm.hpp"
+#include "pmm.hpp"
+#include "gdt.hpp"
 #include <stddef.h>
+
+extern GDT* g_gdt;
 
 // Global pointers
 static Thread* s_current_thread     = nullptr;
@@ -34,7 +39,10 @@ static void idle_main() {
 Process::Process() {
     static uint64_t next_pid = 1;
     pid = next_pid++;
-    page_table_phys = 0;
+    is_user = false;
+    // Default: use the kernel master PML4.
+    // User processes will override this in the Thread constructor.
+    page_table_phys = vmm_get_kernel_pml4();
 }
 
 Process::~Process() {
@@ -52,9 +60,11 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
     // The top of the stack (stack grows downwards)
     uint64_t stack_top = (uint64_t)stack + 16384;
     
+    // kernel_stack stores the TOP of the kernel stack (for TSS RSP0 and for the scheduler)
+    kernel_stack = stack_top;
+    
     // Reserve space for the Context structure at the top of the stack
-    kernel_stack = stack_top - sizeof(Context);
-    context = reinterpret_cast<Context*>(kernel_stack);
+    context = reinterpret_cast<Context*>(stack_top - sizeof(Context));
     
     // Zero out the Context
     uint8_t* ctx_ptr = reinterpret_cast<uint8_t*>(context);
@@ -68,7 +78,17 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
         context->cs = 0x20 | 3; // USER_CS with RPL 3
         context->ss = 0x18 | 3; // USER_SS with RPL 3
         context->rflags = 0x202; // IF (Interrupts enabled)
-        context->rsp = 0; // To be set when allocating User Virtual Memory
+        
+        // Give this user process its own isolated address space
+        parent_process->is_user = true;
+        parent_process->page_table_phys = vmm_create_address_space();
+        
+        // Allocate User Stack (1 Page = 4KB) at 0x00007FFFF0000000
+        uintptr_t user_stack_phys = pmm_alloc_page();
+        uintptr_t user_stack_virt = 0x00007FFFF0000000 - 4096;
+        vmm_map_page(parent_process->page_table_phys, user_stack_virt, user_stack_phys, VMM_PRESENT | VMM_WRITE | VMM_USER);
+        
+        context->rsp = 0x00007FFFF0000000;
     } else {
         context->cs = 0x08; // KERNEL_CS
         context->ss = 0x10; // KERNEL_SS
@@ -163,8 +183,15 @@ extern "C" Context* scheduler_switch(Context* current_context) {
     s_current_thread->state = THREAD_RUNNING;
     arch_restore_fpu(s_current_thread->fpu_state);
     
-    // TODO: Switch Page Table (PML4) if parent_process changed!
-    // TODO: Update TSS (Task State Segment) RSP0 so Ring 3 interrupts land on the new Kernel Stack
+    // Switch Page Table (PML4) if parent_process changed!
+    if (s_current_thread->parent_process) {
+        vmm_switch_address_space(s_current_thread->parent_process->page_table_phys);
+    }
+    
+    // Update TSS (Task State Segment) RSP0 so Ring 3 interrupts land on the new Kernel Stack
+    if (g_gdt) {
+        g_gdt->set_kernel_stack(s_current_thread->kernel_stack);
+    }
     
     return s_current_thread->context;
 }

@@ -25,3 +25,5 @@
 Thread* g_gamepad_thread = nullptr;
 Thread* g_usb_thread = nullptr;
 Thread* g_kernel_thread = nullptr;
+
+extern void cpp_call_constructors();

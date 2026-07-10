@@ -144,6 +144,8 @@ seed_disk: images
 	@mcopy -o -i $(DISK_IMG) $(STAGE_DIR)/HELLO.TXT ::/HELLO.TXT
 	@echo "This is the USB stick!" > $(STAGE_DIR)/USB.TXT
 	@mcopy -o -i $(USB_IMG) $(STAGE_DIR)/USB.TXT ::/USB.TXT
+	@$(MAKE) -C userspace
+	@mcopy -o -i $(NVME_IMG) userspace/hello.drk ::/hello.drk
 	@sync
 	@sleep 0.1
 	@echo "[drakos] disk and usb seeded"
@@ -154,7 +156,8 @@ clean:
 	sudo rm -rf $(BUILD) $(ISO) iso_root $(STAGE_DIR) $(USB_IMG) $(DISK_IMG) $(NVME_IMG)
 
 
-run: $(ISO) images
+run: $(ISO) seed_disk
+	@sudo chmod 666 $(DISK_IMG) $(USB_IMG) $(NVME_IMG) 2>/dev/null || true
 	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio \
 		-device qemu-xhci,id=xhci \
 		-device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 \

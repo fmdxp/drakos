@@ -169,8 +169,6 @@ void USBManager::enumerate_device(uint8_t slot_id, XHCI* xhci) {
                     // Init USB Mass Storage driver
                     USB::USBMassStorage* msc = new USB::USBMassStorage(slot_id, xhci);
                     if (msc->init()) {
-                        if (g_vga) g_vga->write("USB MSC: Drive ready! Mounting FAT32...\n");
-                        
                         // Try to mount FAT32 via VFS
                         VFS::Fat32FS* vfs_fs = new VFS::Fat32FS(msc);
                         if (vfs_fs->init()) {

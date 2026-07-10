@@ -30,6 +30,22 @@ SECTIONS
 
     .rodata : ALIGN(4K) {
         *(.rodata .rodata.*)
+        
+        /* --- GLOBAL CONSTRUCTORS / DESTRUCTORS --- */
+        . = ALIGN(8);
+        __init_array_start = .;
+        KEEP(*(.init_array))
+        KEEP(*(.init_array.*))
+        KEEP(*(.ctors))
+        __init_array_end = .;
+
+        . = ALIGN(8);
+        __fini_array_start = .;
+        KEEP(*(.fini_array))
+        KEEP(*(.fini_array.*))
+        KEEP(*(.dtors))
+        __fini_array_end = .;
+
         /* --- MODULE INITCALLS --- */
         . = ALIGN(8);
         __initcalls_1_core_start = .;

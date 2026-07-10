@@ -175,15 +175,17 @@ bool NVMeController::submit_io(uint32_t nsid, uint64_t lba, uint32_t count, uint
 }
 
 bool NVMeController::init() {
-    uint32_t bar0_low = g_pci->read(m_pci.bus, m_pci.device, m_pci.function, 0x10);
-    uint32_t bar0_high = g_pci->read(m_pci.bus, m_pci.device, m_pci.function, 0x14);
+    uint32_t bar0_low  = pci_read_raw(m_pci.bus, m_pci.device, m_pci.function, 0x10);
+    uint32_t bar0_high = pci_read_raw(m_pci.bus, m_pci.device, m_pci.function, 0x14);
     uintptr_t phys_base = (bar0_low & 0xFFFFFFF0) | ((uint64_t)bar0_high << 32);
     
     m_bar0 = phys_base + pmm_hhdm_offset();
     vmm_map(m_bar0 & ~0xFFFULL, phys_base & ~0xFFFULL, VMM_MMIO);
     vmm_map((m_bar0 + 0x1000) & ~0xFFFULL, (phys_base + 0x1000) & ~0xFFFULL, VMM_MMIO);
 
-    g_pci->write(m_pci.bus, m_pci.device, m_pci.function, 0x04, g_pci->read(m_pci.bus, m_pci.device, m_pci.function, 0x04) | 0x06); // Enable Bus Master, Memory Space
+    // Enable Bus Master + Memory Space via raw PCI I/O (g_pci may not be ready yet)
+    uint32_t cmd = pci_read_raw(m_pci.bus, m_pci.device, m_pci.function, 0x04);
+    pci_write_raw(m_pci.bus, m_pci.device, m_pci.function, 0x04, cmd | 0x06);
 
     uint64_t cap = *reinterpret_cast<volatile uint64_t*>(m_bar0 + NVME_REG_CAP);
     m_doorbell_stride = (cap >> 32) & 0xF;
@@ -218,8 +220,6 @@ bool NVMeController::init() {
         if (g_vga) g_vga->write("NVMe: Failed to enable controller!\n");
         return false;
     }
-    
-    if (g_vga) g_vga->write("NVMe: Controller Ready!\n");
     
     // Allocate I/O Queues
     m_iosq_phys = pmm_alloc_page();
@@ -264,17 +264,11 @@ bool NVMeController::init() {
     if (submit_admin_cmd(id_ns) == 0) {
         uint64_t nsze = *reinterpret_cast<uint64_t*>((uintptr_t)id_virt + 0);
         
-        if (g_vga) {
-            g_vga->write("NVMe: Namespace 1 Found!\n");
-        }
-        
         NVMeNamespace* ns = new NVMeNamespace(this, 1, nsze, 512);
         
         VFS::Fat32FS* fs = new VFS::Fat32FS(ns);
-        if (fs->init()) {
-            vfs_mount("/nvme", fs);
-            if (g_vga) g_vga->write("NVMe: Mounted /nvme!\n");
-        }
+        if (fs->init()) vfs_mount("/nvme", fs);
+        
     }
     
     return true;

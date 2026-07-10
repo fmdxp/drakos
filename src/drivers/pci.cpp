@@ -175,10 +175,8 @@ void PCI::check_function(uint8_t bus, uint8_t device, uint8_t func) {
     print_device(pci_dev);
 
     // Is this an xHCI Controller?
-    if (class_code == 0x01 && subclass == 0x08 && prog_if == 0x02) {
-        if (g_vga) g_vga->write("PCI: Found NVMe Controller\n");
-        NVMe::init_nvme(pci_dev);
-    }
+    if (class_code == 0x01 && subclass == 0x08 && prog_if == 0x02) NVMe::init_nvme(pci_dev);
+    
     if (class_code == 0x0C && subclass == 0x03 && prog_if == 0x30) {
         // Read BAR0 (Offset 0x10) and BAR1 (Offset 0x14) for 64-bit address
         uint32_t bar0 = read(bus, device, func, 0x10);

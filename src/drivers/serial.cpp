@@ -19,6 +19,18 @@
 
 #include "serial.hpp"
 
+static volatile bool serial_lock = false;
+
+static inline void lock_serial() {
+    while (__atomic_test_and_set(&serial_lock, __ATOMIC_ACQUIRE)) {}
+}
+
+static inline void unlock_serial() {
+    __atomic_clear(&serial_lock, __ATOMIC_RELEASE);
+}
+
+
+
 inline uint8_t Serial::inb(uint16_t port) {
     uint8_t value;
     asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
@@ -82,8 +94,10 @@ const char* Serial::get_name() const {
 
 void Serial::write_char(char c) {
     // Wait until the transmit buffer is ready
+    lock_serial();
     while (!is_transmit_ready());
     outb(COM1_PORT, (uint8_t)c);
+    unlock_serial();
 }
 
 void Serial::write(const char* str) {
