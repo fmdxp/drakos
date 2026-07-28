@@ -64,6 +64,9 @@ extern "C" void isr_32();
 extern "C" void isr_33();
 extern "C" void isr_40();
 
+// Global system tick counter
+volatile uint64_t g_system_ticks = 0;
+
 // The central C++ interrupt handler called by isr_stubs.S
 extern "C" void isr_handler(Context* ctx) {
     if (ctx->int_no < 32) {
@@ -112,8 +115,7 @@ extern "C" void isr_handler(Context* ctx) {
     // Example hardware interrupts
     if (ctx->int_no == 32) {
         // APIC Timer (IRQ 0 via APIC)
-        // We just send EOI. The context switch will happen automatically
-        // when isr_common calls scheduler_switch.
+        g_system_ticks++;
         lapic_eoi();
     } else if (ctx->int_no == 33) {
         // Keyboard (IRQ 1)

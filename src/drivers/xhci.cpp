@@ -22,8 +22,9 @@
 #include "pmm.hpp"
 #include "vmm.hpp"
 #include "vga.hpp"
-#include "input/dualsense.hpp"
+#include "usb/usb_hid_transport.hpp"
 #include "usb/usb.hpp"
+#include "drivers/bluetooth.hpp"
 
 // Capability Registers Offsets
 #define XHCI_CAPLENGTH      0x00
@@ -403,6 +404,16 @@ bool XHCI::do_control_transfer(uint32_t slot_id, uint8_t request_type, uint8_t r
         if (pcs) trb.control |= 1; else trb.control &= ~1;
         ep0_ring[ring_idx] = trb;
         ring_idx++;
+        
+        if (ring_idx == 255) {
+            if (pcs) {
+                ep0_ring[255].control |= 1;
+            } else {
+                ep0_ring[255].control &= ~1;
+            }
+            ring_idx = 0;
+            pcs = !pcs;
+        }
     };
     
     TRB setup {};
@@ -429,10 +440,11 @@ bool XHCI::do_control_transfer(uint32_t slot_id, uint8_t request_type, uint8_t r
     status.control = (TRB_STATUS_STAGE << 10) | (dir << 16) | (1 << 5);
     enqueue_trb(status);
     
+    m_ep_transfer_complete[slot_id][1] = false;
     m_transfer_complete = false;
     ring_doorbell(slot_id, 1);
     
-    while (!m_transfer_complete) asm volatile("pause");
+    while (!m_ep_transfer_complete[slot_id][1]) poll_event_ring();
     return true;
 }
 
@@ -477,8 +489,8 @@ bool XHCI::configure_endpoint(uint32_t slot_id, uint8_t ep_num, uint8_t ep_type,
     }
     ring[255].parameter1 = ring_phys & 0xFFFFFFFF;
     ring[255].parameter2 = (ring_phys >> 32) & 0xFFFFFFFF;
-    // Type 6 = Link TRB. Bit 1 = Toggle Cycle (TC).
-    ring[255].control = (6 << 10) | (1 << 1); 
+    // Type 6 = Link TRB. Bit 1 = Toggle Cycle (TC). Bit 0 = Cycle Bit (PCS=1 initially).
+    ring[255].control = (6 << 10) | (1 << 1) | 1; 
     
     in_ctx[ep_ctx_idx + 4] = max_packet_size;
     
@@ -487,10 +499,11 @@ bool XHCI::configure_endpoint(uint32_t slot_id, uint8_t ep_num, uint8_t ep_type,
     cmd.parameter2 = (in_ctx_phys >> 32) & 0xFFFFFFFF;
     cmd.control = (12 << 10) | (slot_id << 24); // Configure Endpoint TRB
     
-    m_transfer_complete = false;
+    m_cmd_complete = false;
     send_command(cmd);
     
-    while (!m_transfer_complete) {
+    while (!m_cmd_complete) {
+        poll_event_ring();
         asm volatile("pause");
     }
     return true;
@@ -541,10 +554,10 @@ static uintptr_t alloc_and_init_ring(TRB*& ring_out) {
         ring_out[i].status     = 0;
         ring_out[i].control    = 0;
     }
-    // Link TRB at slot 255
+    // Link TRB at slot 255 (TC=1, Cycle Bit=1 initially)
     ring_out[255].parameter1 = ring_phys & 0xFFFFFFFF;
     ring_out[255].parameter2 = (ring_phys >> 32) & 0xFFFFFFFF;
-    ring_out[255].control    = (6 << 10) | (1 << 1); // Link TRB, TC
+    ring_out[255].control    = (6 << 10) | (1 << 1) | 1;
     return ring_phys;
 }
 
@@ -615,9 +628,12 @@ bool XHCI::configure_bulk_endpoints(uint32_t slot_id, uint8_t ep_out_num, uint8_
     cmd.parameter2 = (in_ctx_phys >> 32) & 0xFFFFFFFF;
     cmd.control    = (12 << 10) | (slot_id << 24); // Configure Endpoint TRB
 
-    m_transfer_complete = false;
+    m_cmd_complete = false;
     send_command(cmd);
-    while (!m_transfer_complete) asm volatile("pause");
+    while (!m_cmd_complete) {
+        poll_event_ring();
+        asm volatile("pause");
+    }
 
     return true;
 }
@@ -644,14 +660,18 @@ bool XHCI::submit_bulk_out(uint32_t slot_id, void* buffer_phys, uint32_t length)
         idx = 0; pcs = !pcs;
     }
 
-    m_transfer_complete = false;
-    ring_doorbell(slot_id, m_bulk_out_dci[slot_id]);
+    uint8_t dci = m_bulk_out_dci[slot_id];
+    m_ep_transfer_complete[slot_id][dci] = false;
+    ring_doorbell(slot_id, dci);
     int timeout = 0;
-    while (!m_transfer_complete && timeout++ < 5000000) asm volatile("pause");
-    return m_transfer_complete;
+    while (!m_ep_transfer_complete[slot_id][dci] && timeout++ < 5000000) {
+        poll_event_ring();
+        asm volatile("pause");
+    }
+    return m_ep_transfer_complete[slot_id][dci];
 }
 
-bool XHCI::submit_bulk_in(uint32_t slot_id, void* buffer_phys, uint32_t length) {
+bool XHCI::submit_bulk_in(uint32_t slot_id, void* buffer_phys, uint32_t length, bool wait) {
     uintptr_t ring_phys = m_bulk_in_rings_phys[slot_id];
     if (!ring_phys) return false;
 
@@ -673,11 +693,18 @@ bool XHCI::submit_bulk_in(uint32_t slot_id, void* buffer_phys, uint32_t length) 
         idx = 0; pcs = !pcs;
     }
 
-    m_transfer_complete = false;
-    ring_doorbell(slot_id, m_bulk_in_dci[slot_id]);
+    uint8_t dci = m_bulk_in_dci[slot_id];
+    m_ep_transfer_complete[slot_id][dci] = false;
+    ring_doorbell(slot_id, dci);
+
+    if (!wait) return true;
+
     int timeout = 0;
-    while (!m_transfer_complete && timeout++ < 5000000) asm volatile("pause");
-    return m_transfer_complete;
+    while (!m_ep_transfer_complete[slot_id][dci] && timeout++ < 5000000) {
+        poll_event_ring();
+        asm volatile("pause");
+    }
+    return m_ep_transfer_complete[slot_id][dci];
 }
 
 void XHCI::poll_event_ring() {
@@ -725,28 +752,34 @@ void XHCI::poll_event_ring() {
                     if (g_usb_manager) g_usb_manager->register_device(slot_id, this);
                     m_port_setup_complete = true;
                 } else if (cmd_type == 12) { // Configure Endpoint
+                    m_cmd_complete = true;
                     m_transfer_complete = true;
                 }
             } else if (cmd_completion_code != 1) {
                 if (g_vga) g_vga->write("xHCI: TRB ERROR! Check context structures.\n");
                 m_port_setup_complete = true;
+                m_cmd_complete = true;
                 m_transfer_complete = true;
             }
             
         } else if (trb_type == TRB_EVENT_TRANSFER) {
             uint32_t ep_id = (current_event.control >> 16) & 0x1F;
-            uint32_t completion_code = (current_event.status >> 24) & 0xFF;
-            uint32_t residual = current_event.status & 0xFFFFFF;
+            uint32_t slot_id = (current_event.control >> 24) & 0xFF;
             
+            if (slot_id < 256 && ep_id < 32) {
+                m_ep_transfer_complete[slot_id][ep_id] = true;
+            }
+            m_transfer_complete = true;
+
             if (ep_id > 1) {
-                if (g_dualsense_driver) {
-                    g_dualsense_driver->on_report_received();
+                if (g_usb_hid_transport) {
+                    g_usb_hid_transport->on_interrupt();
                 }
-                // Always signal completion so bulk waiters (MSC) can proceed
-                m_transfer_complete = true;
-            } else {
-                // EP 0/1 (control): signal completion
-                m_transfer_complete = true;
+                
+                extern BluetoothHCI* g_bluetooth_hci;
+                if (g_bluetooth_hci && slot_id == g_bluetooth_hci->get_slot_id() && ep_id == m_bulk_in_dci[slot_id]) {
+                    g_bluetooth_hci->on_acl_in_complete();
+                }
             }
         } else if (trb_type == TRB_EVENT_PORT_STATUS) {
             // Port Status Change Event Received

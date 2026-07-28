@@ -27,6 +27,7 @@
 // AVX-512 (bits 5,6,7) and AMX (bits 17,18) would push the XSAVE area
 // well beyond our FPU_STATE_SIZE (4096 bytes) inside each Thread struct,
 // corrupting adjacent memory. Limit to 832 bytes max (512 legacy + 64 header + 256 AVX).
+// This is available from all CPU from 2011 and up
 void enable_fpu_and_avx() {
     uint32_t eax, ebx, ecx, edx;
 

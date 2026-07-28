@@ -34,7 +34,6 @@ BUILD 		= build
 USB_IMG		= usb_stick.img
 DISK_IMG	= disk.img
 NVME_IMG	= nvme.img
-STAGE_DIR 	= stage_disk
 
 USB_IMG_SIZE 	= 64M
 DISK_IMG_SIZE 	= 512M
@@ -53,7 +52,7 @@ vpath %.S $(sort $(dir $(SRCS_ASM)))
 
 ## Flags ##
 
-CXXFLAGS = 	-std=c++20 -O2 -Wall -Wextra \
+CXXFLAGS = 	-std=c++20 -O0 -fno-inline -Wall -Wextra \
 			-ffreestanding \
 			-fno-exceptions \
 			-fno-rtti \
@@ -111,69 +110,78 @@ $(ISO): $(KERNEL) limine.conf
 		iso_root -o $(ISO)
 
 
-images:
-	@if [ ! -f $(USB_IMG) ]; then \
-		echo "[drakos] creating USB image..."; \
-		fallocate -l $(USB_IMG_SIZE) $(USB_IMG) || dd if=/dev/zero of=$(USB_IMG) bs=1M count=64; \
-		mkfs.fat -F 32 $(USB_IMG); \
-	else \
-		echo "[drakos] USB image already exists"; \
-	fi
+images: $(USB_IMG) $(DISK_IMG) $(NVME_IMG)
+	@true
 
-	@if [ ! -f $(DISK_IMG) ]; then \
-		echo "[drakos] Creating DISK image..."; \
-		fallocate -l $(DISK_IMG_SIZE) $(DISK_IMG) || dd if=/dev/zero of=$(DISK_IMG) bs=1M count=512; \
-		mkfs.fat -F 32 $(DISK_IMG); \
-	else \
-		echo "[drakos] DISK image already exists"; \
-	fi
+$(USB_IMG):
+	@echo "[drakos] Creating USB image..."
+	fallocate -l $(USB_IMG_SIZE) $@ || dd if=/dev/zero of=$@ bs=1M count=64
+	mkfs.fat -F 32 $@
+	chmod 666 $@
+	@echo "This is the USB stick!" > build/USB.TXT
+	mcopy -o -i $@ build/USB.TXT ::/USB.TXT
+	@rm -f build/USB.TXT
 
-	@if [ ! -f $(NVME_IMG) ]; then \
-		echo "[drakos] Creating NVME image..."; \
-		fallocate -l $(NVME_IMG_SIZE) $(NVME_IMG) || dd if=/dev/zero of=$(NVME_IMG) bs=1M count=64; \
-		mkfs.fat -F 32 $(NVME_IMG); \
-	else \
-		echo "[drakos] NVME image already exists"; \
-	fi
+$(DISK_IMG):
+	@echo "[drakos] Creating DISK image..."
+	fallocate -l $(DISK_IMG_SIZE) $@ || dd if=/dev/zero of=$@ bs=1M count=512
+	mkfs.fat -F 32 $@
+	chmod 666 $@
+	@echo "Hello from drakos VFS!" > build/HELLO.TXT
+	mcopy -o -i $@ build/HELLO.TXT ::/HELLO.TXT
+	@rm -f build/HELLO.TXT
+	@echo "[drakos] Copying Intel BT Firmware..."
+	@find /usr/lib/firmware/intel -name "ibt-*.sfi.zst" ! -name "*-iml*" ! -name "*-pci*" ! -name "*-usb*" -exec bash -c 'for f; do base=$$(basename "$$f" .sfi.zst); short=$${base#ibt-}; short=$${short//-/}; short=$${short:0:8}; zstd -d -c -f -q "$$f" > "build/$$short.SFI"; mcopy -o -i $@ "build/$$short.SFI" ::/; done' _ {} + || true
 
+
+# NVMe image: always recreated fresh whenever hello.drk changes
+$(NVME_IMG): userspace/hello.drk
+	@echo "[drakos] Creating NVMe image..."
+	fallocate -l $(NVME_IMG_SIZE) $@ || dd if=/dev/zero of=$@ bs=1M count=64
+	mkfs.fat -F 32 $@
+	chmod 666 $@
+	mcopy -o -i $@ userspace/hello.drk ::/hello.drk
+	@sync
+	@echo "[drakos] NVMe seeded with hello.drk"
+
+.PHONY: FORCE build_userspace clean_userspace
+
+build_userspace:
+	@$(MAKE) -C userspace --no-print-directory
+
+userspace/hello.drk: FORCE
+	@$(MAKE) -C userspace --no-print-directory
 
 seed_disk: images
-	@echo "[drakos] seeding disk..."
-	@rm -rf $(STAGE_DIR) || sudo rm -rf $(STAGE_DIR)
-	@mkdir -p $(STAGE_DIR)
-	@echo "Hello from drakos VFS!" > $(STAGE_DIR)/HELLO.TXT
-	@mcopy -o -i $(DISK_IMG) $(STAGE_DIR)/HELLO.TXT ::/HELLO.TXT
-	@echo "This is the USB stick!" > $(STAGE_DIR)/USB.TXT
-	@mcopy -o -i $(USB_IMG) $(STAGE_DIR)/USB.TXT ::/USB.TXT
-	@$(MAKE) -C userspace
-	@mcopy -o -i $(NVME_IMG) userspace/hello.drk ::/hello.drk
-	@sync
-	@sleep 0.1
-	@echo "[drakos] disk and usb seeded"
+	@echo "[drakos] All disks ready."
 
 
 
-clean:
-	sudo rm -rf $(BUILD) $(ISO) iso_root $(STAGE_DIR) $(USB_IMG) $(DISK_IMG) $(NVME_IMG)
+clean_userspace:
+	@$(MAKE) -C userspace clean --no-print-directory
+
+clean: clean_userspace
+	rm -rf $(BUILD) $(ISO) iso_root $(USB_IMG) $(DISK_IMG) $(NVME_IMG)
 
 
 run: $(ISO) seed_disk
 	@sudo chmod 666 $(DISK_IMG) $(USB_IMG) $(NVME_IMG) 2>/dev/null || true
-	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom $(ISO) -m 256M -display sdl -serial stdio \
-		-device qemu-xhci,id=xhci \
-		-device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 \
-		-device usb-kbd,bus=xhci.0 \
-		-drive id=usbdisk,file=usb_stick.img,if=none,format=raw \
-		-device usb-storage,bus=xhci.0,drive=usbdisk \
-		-drive id=disk,file=disk.img,if=none,format=raw \
-		-device ahci,id=ahci \
-		-device ide-hd,drive=disk,bus=ahci.0 \
-		-drive id=nvme0,file=$(NVME_IMG),if=none,format=raw \
-		-device nvme,serial=NVME1234,drive=nvme0
+	sudo qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom drakos.iso -m 256M -serial stdio \
+        -device qemu-xhci,id=xhci \
+        -device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 \
+        -device usb-host,bus=xhci.0,vendorid=0x8087,productid=0x0026 \
+        -device usb-kbd,bus=xhci.0 \
+        -drive id=usbdisk,file=usb_stick.img,if=none,format=raw,file.locking=off \
+        -device usb-storage,bus=xhci.0,drive=usbdisk \
+        -drive id=disk,file=disk.img,if=none,format=raw,file.locking=off \
+        -device ahci,id=ahci \
+        -device ide-hd,drive=disk,bus=ahci.0 \
+        -drive id=nvme0,file=nvme.img,if=none,format=raw,file.locking=off \
+        -device nvme,serial=NVME1234,drive=nvme0
 
 
 debug: $(ISO) images seed_disk
-	qemu-system-x86_64 \
+	sudo qemu-system-x86_64 \
 		-cpu max \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-cdrom $(ISO) \

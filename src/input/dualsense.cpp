@@ -25,50 +25,38 @@
 #include "vga.hpp"
 #include "thread.hpp"
 
+#include "input/hid_transport.hpp"
+
 DualSenseDriver* g_dualsense_driver = nullptr;
 
-DualSenseDriver::DualSenseDriver(uint32_t slot_id, uint8_t ep_num, uint16_t max_packet_size, XHCI* xhci)
-    : m_slot_id(slot_id), m_ep_num(ep_num), m_max_packet_size(max_packet_size), m_xhci(xhci)
+DualSenseDriver::DualSenseDriver(HIDTransport* transport)
+    : m_transport(transport)
 {
     // Register a slot in the GamepadManager
     m_gamepad_index = Input::GamepadManager::register_gamepad(Input::GamepadType::PlayStation5);
 
-    // Allocate DMA buffer for HID reports (physical, contiguous)
-    m_report_buf_phys = pmm_alloc(1);
-    m_report_buf_virt = reinterpret_cast<uint8_t*>(m_report_buf_phys + pmm_hhdm_offset());
+    if (g_vga) g_vga->write("DualSense: Driver initialized, waiting for input...\n");
 
-    // Configure the Interrupt IN endpoint on xHCI
-    // ep_type = 7 = Interrupt IN (xHCI spec Table 60)
-    xhci->configure_endpoint(m_slot_id, m_ep_num, 7, m_max_packet_size, 4);
-
-    if (g_vga) g_vga->write("DualSense: Driver initialized, listening for input...\n");
-
-    // Assign the global pointer EARLY! 
-    // Otherwise, the xHCI interrupt for the first read might fire while we are 
-    // blocked in set_led(), and it will see a null pointer and drop the stream!
+    // Assign the global pointer
     g_dualsense_driver = this;
 
-    // Submit first read
-    prime_interrupt();
-    
-    // Light up the LED to Cyan to show it's working! i hate this led with all my heart <3
-    // init_lightbar();
-    // set_led(0, 255, 255);
+    // Start listening on the transport
+    m_transport->start_listening(this);
+
+    // Send initial LED output report to enable extended mode (touchpad & lightbar)
+    set_led(0, 0, 255);
 }
 
-void DualSenseDriver::prime_interrupt() {
-    // Submit a Normal TRB on the Interrupt IN endpoint to receive the next HID Report
-    m_xhci->submit_interrupt_in(m_slot_id, reinterpret_cast<void*>(m_report_buf_phys), m_max_packet_size);
-}
+void DualSenseDriver::on_report_received(const uint8_t* report, size_t length) {
+    (void)length;
 
-void DualSenseDriver::on_report_received() {
     // Debug print the first 10 bytes of the report
     static int debug_prints = 0;
     if (g_vga && debug_prints < 10) {
         g_vga->write("DualSense: Report Bytes: ");
         for (int i = 0; i < 10; i++) {
             char buf[3];
-            uint8_t val = m_report_buf_virt[i];
+            uint8_t val = report[i];
             const char* hex = "0123456789ABCDEF";
             buf[0] = hex[val >> 4];
             buf[1] = hex[val & 0x0F];
@@ -80,77 +68,106 @@ void DualSenseDriver::on_report_received() {
         debug_prints++;
     }
 
-    // Called by xHCI ISR when TRB_EVENT_TRANSFER fires for this slot
-    bool changed = parse_report(m_report_buf_virt);
+    parse_report(report);
 
     // Wake gamepad thread
-    if (changed) {
-        extern Thread* g_gamepad_thread;
-        if (g_gamepad_thread) {
-            extern void scheduler_wake_thread(Thread* t);
-            scheduler_wake_thread(g_gamepad_thread);
-        }
+    extern volatile int g_gamepad_pending_reports;
+    g_gamepad_pending_reports = g_gamepad_pending_reports + 1;
+    extern Thread* g_gamepad_thread;
+    if (g_gamepad_thread) {
+        extern void scheduler_wake_thread(Thread* t);
+        scheduler_wake_thread(g_gamepad_thread);
     }
-
-    // Re-submit buffer to keep the stream going
-    prime_interrupt();
 }
 
 bool DualSenseDriver::parse_report(const uint8_t* r) {
-    if (r[0] != 0x01) return false;
-
     Input::GamepadState* state = Input::GamepadManager::get_gamepad(m_gamepad_index);
     if (!state) return false;
 
     Input::GamepadState old_state = *state;
+    uint8_t report_id = r[0];
 
-    // Analog sticks
-    state->left_stick_x  = r[1];
-    state->left_stick_y  = r[2];
-    state->right_stick_x = r[3];
-    state->right_stick_y = r[4];
+    if (report_id == 0x01) {
+        // Simple Report format (Bluetooth default)
+        state->left_stick_x  = r[1];
+        state->left_stick_y  = r[2];
+        state->right_stick_x = r[3];
+        state->right_stick_y = r[4];
 
-    // Triggers
-    state->left_trigger  = r[5];
-    state->right_trigger = r[6];
+        // Byte 5: D-Pad (bits 0-3) + Face Buttons (bits 4-7)
+        uint8_t dpad = r[5] & 0x0F;
+        state->dpad_up    = (dpad == 0 || dpad == 1 || dpad == 7);
+        state->dpad_right = (dpad == 1 || dpad == 2 || dpad == 3);
+        state->dpad_down  = (dpad == 3 || dpad == 4 || dpad == 5);
+        state->dpad_left  = (dpad == 5 || dpad == 6 || dpad == 7);
 
-    // D-Pad
-    uint8_t dpad = r[8] & 0x0F;
-    state->dpad_up    = (dpad == 0 || dpad == 1 || dpad == 7);
-    state->dpad_right = (dpad == 1 || dpad == 2 || dpad == 3);
-    state->dpad_down  = (dpad == 3 || dpad == 4 || dpad == 5);
-    state->dpad_left  = (dpad == 5 || dpad == 6 || dpad == 7);
+        state->btn_x = (r[5] >> 4) & 1; // Square
+        state->btn_a = (r[5] >> 5) & 1; // Cross
+        state->btn_b = (r[5] >> 6) & 1; // Circle
+        state->btn_y = (r[5] >> 7) & 1; // Triangle
 
-    // Face buttons
-    state->btn_x = (r[8] >> 4) & 1;
-    state->btn_a = (r[8] >> 5) & 1;
-    state->btn_b = (r[8] >> 6) & 1;
-    state->btn_y = (r[8] >> 7) & 1;
+        // Byte 6: Shoulder / System buttons
+        state->btn_l1      = (r[6] >> 0) & 1;
+        state->btn_r1      = (r[6] >> 1) & 1;
+        state->btn_share   = (r[6] >> 4) & 1;
+        state->btn_options = (r[6] >> 5) & 1;
+        state->btn_l3      = (r[6] >> 6) & 1;
+        state->btn_r3      = (r[6] >> 7) & 1;
 
-    // Shoulder / System
-    state->btn_l1      = (r[9] >> 0) & 1;
-    state->btn_r1      = (r[9] >> 1) & 1;
-    state->btn_share   = (r[9] >> 4) & 1;
-    state->btn_options = (r[9] >> 5) & 1;
-    state->btn_l3      = (r[9] >> 6) & 1;
-    state->btn_r3      = (r[9] >> 7) & 1;
+        // Byte 7: PS / Touchpad Click
+        state->btn_logo     = (r[7] >> 0) & 1;
+        state->btn_touchpad = (r[7] >> 1) & 1;
 
-    // PS / Logo / Touchpad Click
-    state->btn_logo = (r[10] >> 0) & 1;
-    state->btn_touchpad = (r[10] >> 1) & 1;
-    
-    uint32_t tp1 = 33;
-    state->touchpad_touching_1 = ((r[tp1] & 0x80) == 0);
-    if (state->touchpad_touching_1) {
-        state->touchpad_x_1 = r[tp1 + 1] | ((r[tp1 + 2] & 0x0F) << 8);
-        state->touchpad_y_1 = ((r[tp1 + 2] & 0xF0) >> 4) | (r[tp1 + 3] << 4);
-    }
-    
-    uint32_t tp2 = 37;
-    state->touchpad_touching_2 = ((r[tp2] & 0x80) == 0);
-    if (state->touchpad_touching_2) {
-        state->touchpad_x_2 = r[tp2 + 1] | ((r[tp2 + 2] & 0x0F) << 8);
-        state->touchpad_y_2 = ((r[tp2 + 2] & 0xF0) >> 4) | (r[tp2 + 3] << 4);
+        // Bytes 8 & 9: Analog Triggers
+        state->left_trigger  = r[8];
+        state->right_trigger = r[9];
+
+    } else if (report_id == 0x31) {
+        // Extended Report format (USB / Extended BT)
+        state->left_stick_x  = r[1];
+        state->left_stick_y  = r[2];
+        state->right_stick_x = r[3];
+        state->right_stick_y = r[4];
+
+        state->left_trigger  = r[5];
+        state->right_trigger = r[6];
+
+        uint8_t dpad = r[8] & 0x0F;
+        state->dpad_up    = (dpad == 0 || dpad == 1 || dpad == 7);
+        state->dpad_right = (dpad == 1 || dpad == 2 || dpad == 3);
+        state->dpad_down  = (dpad == 3 || dpad == 4 || dpad == 5);
+        state->dpad_left  = (dpad == 5 || dpad == 6 || dpad == 7);
+
+        state->btn_x = (r[8] >> 4) & 1;
+        state->btn_a = (r[8] >> 5) & 1;
+        state->btn_b = (r[8] >> 6) & 1;
+        state->btn_y = (r[8] >> 7) & 1;
+
+        state->btn_l1      = (r[9] >> 0) & 1;
+        state->btn_r1      = (r[9] >> 1) & 1;
+        state->btn_share   = (r[9] >> 4) & 1;
+        state->btn_options = (r[9] >> 5) & 1;
+        state->btn_l3      = (r[9] >> 6) & 1;
+        state->btn_r3      = (r[9] >> 7) & 1;
+
+        state->btn_logo     = (r[10] >> 0) & 1;
+        state->btn_touchpad = (r[10] >> 1) & 1;
+        
+        uint32_t tp1 = 33;
+        state->touchpad_touching_1 = ((r[tp1] & 0x80) == 0);
+        if (state->touchpad_touching_1) {
+            state->touchpad_x_1 = r[tp1 + 1] | ((r[tp1 + 2] & 0x0F) << 8);
+            state->touchpad_y_1 = ((r[tp1 + 2] & 0xF0) >> 4) | (r[tp1 + 3] << 4);
+        }
+        
+        uint32_t tp2 = 37;
+        state->touchpad_touching_2 = ((r[tp2] & 0x80) == 0);
+        if (state->touchpad_touching_2) {
+            state->touchpad_x_2 = r[tp2 + 1] | ((r[tp2 + 2] & 0x0F) << 8);
+            state->touchpad_y_2 = ((r[tp2 + 2] & 0xF0) >> 4) | (r[tp2 + 3] << 4);
+        }
+    } else {
+        return false;
     }
 
     bool changed = false;
@@ -201,38 +218,20 @@ void DualSenseDriver::init_lightbar()
 
 
 void DualSenseDriver::set_led(uint8_t r, uint8_t g, uint8_t b) {
-    // god... I hate this
+    uint8_t out[48] = {0};
+    out[0] = 0xFF; // valid_flag0: enable all valid controls (0xFF)
+    out[1] = 0xFF; // valid_flag1: enable all valid controls (0xFF)
+    out[2] = 0x1F; // valid_flag2: enable all valid controls (0x1F)
 
-    uintptr_t out_buf_phys = pmm_alloc(1);
-    uint8_t* out = reinterpret_cast<uint8_t*>(out_buf_phys + pmm_hhdm_offset());
-    for (int i = 0; i < 64; i++) out[i] = 0;
-    
-    out[0] = 0x02; // Report ID
-    out[1] = 0x00; // valid_flag0
-    out[2] = 0x04; // valid_flag1: DS_OUTPUT_VALID_FLAG1_LIGHTBAR_CONTROL_ENABLE
-    out[39] = 0x02; // valid_flag2: DS_OUTPUT_VALID_FLAG2_LIGHTBAR_SETUP_CONTROL_ENABLE
-    out[42] = 0x01; // lightbar_setup: 1 = ON / fade in
-    out[43] = 0xFF; // led_brightness: high
-    out[44] = 0x00; // player_leds
+    out[39] = 0x02; // lightbar_setup: 0x02 = setup lightbar
+    out[40] = 0x00; // led_brightness: 0 = high
+    out[41] = 0x04; // player_leds: 0x04 = Player 1 center LED
 
-    out[45] = r;    // Red
-    out[46] = g;    // Green
-    out[47] = b;    // Blue
+    out[42] = r;    // Red
+    out[43] = g;    // Green
+    out[44] = b;    // Blue
     
-    // Find the HID interface number to send to (usually 3)
-    uint8_t hid_intf = 3;
-    uint16_t len = 48;
-    
-    // Send SET_REPORT (Output). Type=0x21, Request=0x09, Value=0x0202
-    m_xhci->do_control_transfer(
-        m_slot_id, 
-        0x21, 
-        0x09, 
-        0x0202, 
-        hid_intf, 
-        len, 
-        reinterpret_cast<void*>(out_buf_phys)
-    );
+    m_transport->send_output_report(0x02, out, sizeof(out));
 
     if (g_vga) g_vga->write("LED Packet sent\n");
 }

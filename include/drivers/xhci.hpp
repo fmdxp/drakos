@@ -95,6 +95,8 @@ private:
     bool      m_bulk_in_ring_pcs[256] = {false};
     uint8_t   m_bulk_in_dci[256] = {0};
     
+    volatile bool m_cmd_complete = false;
+    volatile bool m_ep_transfer_complete[256][32] = {{false}};
     volatile bool m_transfer_complete = false;
     volatile bool m_port_setup_complete = false;
     
@@ -121,7 +123,7 @@ public:
     bool configure_bulk_endpoints(uint32_t slot_id, uint8_t ep_out_num, uint8_t ep_in_num, uint16_t max_packet_size);
     bool submit_interrupt_in(uint32_t slot_id, void* buffer_phys, uint32_t length);
     bool submit_bulk_out(uint32_t slot_id, void* buffer_phys, uint32_t length);
-    bool submit_bulk_in(uint32_t slot_id, void* buffer_phys, uint32_t length);
+    bool submit_bulk_in(uint32_t slot_id, void* buffer_phys, uint32_t length, bool wait = true);
     
     void handle_interrupt();
     void poll_event_ring();

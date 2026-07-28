@@ -34,16 +34,20 @@ bool FAT32Driver::read_sectors(uint64_t lba, uint32_t count, void* buf) {
 }
 
 bool FAT32Driver::mount() {
-    // Read the BPB from sector 0
-    uint8_t sector[512];
+    uintptr_t phys = pmm_alloc_page();
+    uint8_t* sector = (uint8_t*)(phys + pmm_hhdm_offset());
+    
     if (!read_sectors(0, 1, sector)) {
         if (g_vga) g_vga->write("FAT32: Failed to read boot sector!\n");
+        pmm_free_page(phys);
         return false;
     }
     
     // Copy BPB
     for (int i = 0; i < (int)sizeof(BPB); i++)
         ((uint8_t*)&m_bpb)[i] = sector[i];
+        
+    pmm_free_page(phys);
     
     // Validate FAT32 signature
     if (m_bpb.bytes_per_sector != 512) {
@@ -91,10 +95,17 @@ uint32_t FAT32Driver::next_cluster(uint32_t cluster) {
     uint32_t fat_sector   = m_fat_start_lba + (fat_offset / 512);
     uint32_t entry_offset = (fat_offset % 512) / 4;
     
-    uint32_t sector[128]; // 512 bytes / 4 bytes per entry = 128 entries
-    if (!read_sectors(fat_sector, 1, sector)) return 0x0FFFFFFF;
+    uintptr_t phys = pmm_alloc_page();
+    uint32_t* sector = (uint32_t*)(phys + pmm_hhdm_offset());
     
-    return sector[entry_offset] & 0x0FFFFFFF;
+    if (!read_sectors(fat_sector, 1, sector)) {
+        pmm_free_page(phys);
+        return 0x0FFFFFFF;
+    }
+    
+    uint32_t result = sector[entry_offset] & 0x0FFFFFFF;
+    pmm_free_page(phys);
+    return result;
 }
 
 bool FAT32Driver::read_cluster(uint32_t cluster, void* buf) {
@@ -116,20 +127,30 @@ bool FAT32Driver::write_fat_entry(uint32_t cluster, uint32_t value) {
     uint32_t fat_sector   = m_fat_start_lba + (fat_offset / 512);
     uint32_t entry_offset = (fat_offset % 512) / 4;
     
-    uint32_t sector[128];
-    if (!read_sectors(fat_sector, 1, sector)) return false;
+    uintptr_t phys = pmm_alloc_page();
+    uint32_t* sector = (uint32_t*)(phys + pmm_hhdm_offset());
+    
+    if (!read_sectors(fat_sector, 1, sector)) {
+        pmm_free_page(phys);
+        return false;
+    }
     
     // Preserve top 4 bits of the FAT32 entry
     sector[entry_offset] = (sector[entry_offset] & 0xF0000000) | (value & 0x0FFFFFFF);
     
     // Write back to FAT1
-    if (!write_sectors(fat_sector, 1, sector)) return false;
+    if (!write_sectors(fat_sector, 1, sector)) {
+        pmm_free_page(phys);
+        return false;
+    }
     
     // Write back to FAT2 (if it exists)
     if (m_bpb.num_fats > 1) {
         uint32_t fat2_sector = fat_sector + m_bpb.fat_size_32;
         write_sectors(fat2_sector, 1, sector);
     }
+    
+    pmm_free_page(phys);
     return true;
 }
 

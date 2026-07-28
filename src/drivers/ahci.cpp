@@ -200,7 +200,8 @@ int AHCIDisk::find_cmdslot() {
 }
 
 bool AHCIDisk::read_blocks(uint64_t lba, uint32_t count, void* buffer) {
-    m_port->is = 0xFFFF; // Clear pending interrupt bits
+    m_port->is = 0xFFFFFFFF; // Clear ALL pending interrupt bits (including TFES bit 30)
+    m_port->serr = 0xFFFFFFFF; // Clear any sticky error bits
     int slot = find_cmdslot();
     if (slot == -1) return false;
     
@@ -265,6 +266,13 @@ bool AHCIDisk::read_blocks(uint64_t lba, uint32_t count, void* buffer) {
         if ((m_port->ci & (1 << slot)) == 0) break;
         if (m_port->is & (1 << 30)) {
             if (g_vga) g_vga->write("AHCIDisk: Task file error!\n");
+            // Recovery: stop command engine, clear errors, restart
+            m_port->cmd &= ~(1 << 0); // ST = 0
+            for (int w = 0; w < 100000; w++) asm volatile("pause");
+            m_port->serr = 0xFFFFFFFF;
+            m_port->is = 0xFFFFFFFF;
+            m_port->cmd |= (1 << 4); // FRE = 1
+            m_port->cmd |= (1 << 0); // ST = 1
             return false; // Task file error
         }
         timeout++;

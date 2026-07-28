@@ -121,30 +121,53 @@ ISR_ERR 21
 .extern syscall_handler
 
 syscall_entry:
+    # Save user stack, load kernel stack
+    mov %rsp, g_user_rsp(%rip)
+    mov g_kernel_rsp(%rip), %rsp
 
-    push %rcx
-    push %r11
-    
+    push %r11        # user RFLAGS
+    push %rcx        # user RIP (for sysretq)
+
+    # Save callee-saved registers
+    push %r15
+    push %r14
+    push %r13
+    push %r12
+    push %rbp
+    push %rbx
+
+    # Save syscall args and number
+    push %rax        # syscall number (will also be used as return value slot)
     push %rdi
     push %rsi
     push %rdx
     push %r10
     push %r8
     push %r9
-    push %rax
-    
+
+    # Pass SyscallFrame pointer as first argument to handler
     mov %rsp, %rdi
     call syscall_handler
-    
-    pop %rax
+
+    # Restore registers, but read return value from where rax was pushed
     pop %r9
     pop %r8
     pop %r10
     pop %rdx
     pop %rsi
     pop %rdi
-    
-    pop %r11
-    pop %rcx
-    
+    pop %rax         # return value
+
+    pop %rbx
+    pop %rbp
+    pop %r12
+    pop %r13
+    pop %r14
+    pop %r15
+
+    pop %rcx         # restore user RIP
+    pop %r11         # restore user RFLAGS
+
+    # Restore user stack
+    mov g_user_rsp(%rip), %rsp
     sysretq

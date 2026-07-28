@@ -16,27 +16,36 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+
 #pragma once
+
 #include <stdint.h>
+#include <stddef.h>
+#include "hid_transport.hpp"
 
+class XHCI;
 
-struct SyscallFrame {
-    uint64_t r9, r8, r10, rdx, rsi, rdi;
-    uint64_t num;       // also used as return value slot
-    uint64_t rbx, rbp, r12, r13, r14, r15;
-    uint64_t rcx;       // user RIP
-    uint64_t r11;       // user RFLAGS
+class USBHIDTransport : public HIDTransport {
+public:
+    USBHIDTransport(uint32_t slot_id, uint8_t ep_num, uint16_t max_packet_size, XHCI* xhci);
+    
+    void start_listening(DualSenseDriver* driver) override;
+    void send_output_report(uint8_t report_id, const uint8_t* data, size_t length) override;
+    
+    // Called by the XHCI ISR
+    void on_interrupt();
+
+private:
+    uint32_t m_slot_id;
+    uint8_t  m_ep_num;
+    uint16_t m_max_packet_size;
+    XHCI*    m_xhci;
+    DualSenseDriver* m_driver;
+    
+    uintptr_t m_report_buf_phys;
+    uint8_t*  m_report_buf_virt;
+
+    void prime_interrupt();
 };
 
-#define EPERM    1
-#define ENOENT   2
-#define EBADF    9
-#define ENOMEM   12
-#define EFAULT   14
-#define EINVAL   22
-#define ESPIPE   29
-#define ENOSYS   38
-
-extern "C" void syscall_entry();
-void enable_syscalls();
-extern "C" void syscall_handler(SyscallFrame* frame);
+extern USBHIDTransport* g_usb_hid_transport;

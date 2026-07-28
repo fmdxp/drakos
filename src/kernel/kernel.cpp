@@ -19,7 +19,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-
+ 
 #include "kernel.hpp"
 #include "module.hpp"
 
@@ -56,14 +56,13 @@ static void make_threads_and_processes()
     g_gamepad_thread = new Thread(gamepad_proc, gamepad_thread_main, false, "Gamepad Debugger");
     scheduler_add_thread(g_gamepad_thread);
 
-    // --- Ring 3 App Loader ---
-    DRK::DrkLoader* loader = new DRK::DrkLoader();
-    if (loader->load("/nvme/hello.drk")) {
-        if (g_vga) g_vga->write("Successfully loaded hello.drk!\n");
-    } else if (g_vga) g_vga->write("Failed to load hello.drk.\n");
-    
+    // // --- Ring 3 App Loader ---
+    // DRK::DrkLoader* loader = new DRK::DrkLoader();
+    // if (loader->load("/nvme/HELLO.DRK")) {
+    //     if (g_vga) g_vga->write("Successfully loaded hello.drk!\n");
+    // } else if (g_vga) g_vga->write("Failed to load hello.drk.\n");
 
-    g_kernel_thread = scheduler_get_current_thread();
+    // g_kernel_thread = scheduler_get_current_thread();
 }
 
 
@@ -75,7 +74,7 @@ extern "C" [[noreturn]] void kernel_main(void)
     // 1. Initialize base hardware and VGA, so we can see output
     system_init_modules();
     
-    // 2. Enable MSR Syscalls (yeah, ik we're not in ring 3)
+    // 2. Enable MSR Syscalls (yeee)
     enable_syscalls();
 
     // 3. Enable XSAVE and AVX only AFTER checking CPUID

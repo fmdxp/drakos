@@ -28,12 +28,16 @@ static BitmapFont s_default_font;
 
 static volatile bool fb_lock = false;
 
-static inline void lock_fb() {
-    while (__atomic_test_and_set(&fb_lock, __ATOMIC_ACQUIRE)) {}
+static inline uint64_t lock_fb() {
+    uint64_t rflags;
+    asm volatile("pushfq; popq %0; cli" : "=r"(rflags) :: "memory");
+    while (__atomic_test_and_set(&fb_lock, __ATOMIC_ACQUIRE)) { asm volatile("pause"); }
+    return rflags;
 }
 
-static inline void unlock_fb() {
+static inline void unlock_fb(uint64_t rflags) {
     __atomic_clear(&fb_lock, __ATOMIC_RELEASE);
+    if (rflags & 0x200) asm volatile("sti");
 }
 
 bool VGA::start() {
@@ -98,7 +102,7 @@ void VGA::put_pixel(uint32_t x, uint32_t y, uint32_t color) {
 void VGA::write_char(char c) {
     if (!m_font) return;
 
-    lock_fb();
+    uint64_t flags = lock_fb();
 
     const uint32_t w = m_font->get_width();
     const uint32_t h = m_font->get_height();
@@ -108,7 +112,7 @@ void VGA::write_char(char c) {
         m_cursor_x = 0;
         m_cursor_y += h;
         if (m_cursor_y + h > m_height) scroll();
-        unlock_fb();
+        unlock_fb(flags);
         return;
     }
 
@@ -123,7 +127,7 @@ void VGA::write_char(char c) {
                     put_pixel(m_cursor_x + x, m_cursor_y + y, m_bg_color);  
         }
 
-        unlock_fb();
+        unlock_fb(flags);
         return;
     }
 
@@ -152,7 +156,7 @@ void VGA::write_char(char c) {
 
     // Advance cursor
     m_cursor_x += w;
-    unlock_fb();
+    unlock_fb(flags);
 }
 
 void VGA::write(const char* str) {
@@ -197,7 +201,7 @@ void VGA::clear_cursor() {
 
 
 void VGA::clear_screen() {
-    lock_fb();
+    uint64_t flags = lock_fb();
 
     for (uint32_t y = 0; y < m_height; y++) {
         for (uint32_t x = 0; x < m_width; x++) {
@@ -205,7 +209,7 @@ void VGA::clear_screen() {
         }
     }
 
-    unlock_fb();
+    unlock_fb(flags);
 }
 
 // Register VGA driver as module (level 3_drv)

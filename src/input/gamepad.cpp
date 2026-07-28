@@ -60,9 +60,10 @@ void GamepadManager::gamepad_debug_poll() {
         if (gp->btn_share != last_gp_state.btn_share) changed = true;
         if (gp->btn_options != last_gp_state.btn_options) changed = true;
         if (gp->btn_logo != last_gp_state.btn_logo) changed = true;
+        if (gp->btn_touchpad != last_gp_state.btn_touchpad) changed = true;
         
-        // Analog sticks have jitter, so we use a deadzone of 2 to avoid infinite spam
-        auto diff = [](uint8_t a, uint8_t b) { return a > b ? a - b : b - a; };
+        // Analog sticks and touchpad have jitter, so we use a deadzone of 2 to avoid infinite spam
+        auto diff = [](int a, int b) { return a > b ? a - b : b - a; };
         if (diff(gp->left_stick_x, last_gp_state.left_stick_x) > 2) changed = true;
         if (diff(gp->left_stick_y, last_gp_state.left_stick_y) > 2) changed = true;
         if (diff(gp->right_stick_x, last_gp_state.right_stick_x) > 2) changed = true;
@@ -74,14 +75,6 @@ void GamepadManager::gamepad_debug_poll() {
         if (gp->touchpad_touching_1 && diff(gp->touchpad_x_1, last_gp_state.touchpad_x_1) > 2) changed = true;
         if (gp->touchpad_touching_1 && diff(gp->touchpad_y_1, last_gp_state.touchpad_y_1) > 2) changed = true;
         
-        static uint32_t print_counter = 0;
-        print_counter++;
-        // Print every ~500 iterations depending on hlt
-        if (print_counter > 500) {
-            print_counter = 0;
-            changed = true; // Force print periodically
-        }
-
         if (changed) {
             g_vga->write("Gamepad 0: ");
             if (gp->btn_a) g_vga->write("X ");
@@ -100,6 +93,7 @@ void GamepadManager::gamepad_debug_poll() {
             if (gp->btn_share) g_vga->write("SHR ");
             if (gp->btn_options) g_vga->write("OPT ");
             if (gp->btn_logo) g_vga->write("PS ");
+            if (gp->btn_touchpad) g_vga->write("TP_CLK ");
             
             // Print analog values
             char a_buf[128];
@@ -154,9 +148,16 @@ void GamepadManager::gamepad_debug_poll() {
 } // Input
 
 
+extern volatile int g_gamepad_pending_reports;
+volatile int g_gamepad_pending_reports = 0;
+
+// Gamepad debugger thread main loop
 void gamepad_thread_main() {
     while (1) {
-        scheduler_block_current_thread(); 
-        Input::GamepadManager::gamepad_debug_poll();
+        while (g_gamepad_pending_reports > 0) {
+            g_gamepad_pending_reports = g_gamepad_pending_reports - 1;
+            Input::GamepadManager::gamepad_debug_poll();
+        }
+        scheduler_block_current_thread();
     }
 }

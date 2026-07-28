@@ -21,6 +21,10 @@
 #include "usb_msc.hpp"
 #include "xhci.hpp"
 #include "dualsense.hpp"
+#include "usb/usb_hid_transport.hpp"
+#include "drivers/bluetooth.hpp"
+#include "drivers/bt_l2cap.hpp"
+#include "drivers/bt_manager.hpp"
 #include "fat32.hpp"
 #include "vfs.hpp"
 #include "vfs_fat32.hpp"
@@ -96,6 +100,70 @@ void USBManager::enumerate_device(uint8_t slot_id, XHCI* xhci) {
     if (g_vga) {
         char hex[5];
         // Log rimosso
+    }
+    
+    // --- Early check: Bluetooth USB device (class 0xE0, subclass 0x01, protocol 0x01) ---
+    if (dev_desc->bDeviceClass == 0xE0 && 
+        dev_desc->bDeviceSubClass == 0x01 && 
+        dev_desc->bDeviceProtocol == 0x01) {
+        if (g_vga) g_vga->write("USB: Bluetooth Controller Found!\n");
+        
+        // Get config descriptor
+        uintptr_t bt_cfg_phys = pmm_alloc(2);
+        void* bt_cfg_virt = reinterpret_cast<void*>(bt_cfg_phys + pmm_hhdm_offset());
+        ok = xhci->do_control_transfer(slot_id, 0x80, 6, 0x0200, 0, 9, reinterpret_cast<void*>(bt_cfg_phys));
+        if (!ok) return;
+        
+        USBConfigDescriptor* bt_cfg = reinterpret_cast<USBConfigDescriptor*>(bt_cfg_virt);
+        uint16_t bt_total = bt_cfg->wTotalLength;
+        if (bt_total > 4096 || bt_total < 9) return;
+        
+        ok = xhci->do_control_transfer(slot_id, 0x80, 6, 0x0200, 0, bt_total, reinterpret_cast<void*>(bt_cfg_phys));
+        if (!ok) return;
+        
+        // SET_CONFIGURATION
+        uint8_t bt_cfg_val = bt_cfg->bConfigurationValue;
+        xhci->do_control_transfer(slot_id, 0x00, 9, bt_cfg_val, 0, 0, reinterpret_cast<void*>(pmm_alloc(1)));
+        
+        // Parse endpoints: need Interrupt IN, Bulk OUT, Bulk IN
+        uint8_t bt_int_in_ep = 0, bt_bulk_out_ep = 0, bt_bulk_in_ep = 0;
+        uint16_t bt_int_in_mps = 16, bt_bulk_mps = 64;
+        
+        uint8_t* bt_ptr = reinterpret_cast<uint8_t*>(bt_cfg_virt);
+        uint8_t* bt_end = bt_ptr + bt_total;
+        while (bt_ptr < bt_end) {
+            if (bt_ptr[0] == 0) break;
+            if (bt_ptr[1] == 5) { // Endpoint descriptor
+                USBEndpointDescriptor* ep = reinterpret_cast<USBEndpointDescriptor*>(bt_ptr);
+                uint8_t ep_type = ep->bmAttributes & 0x03;
+                bool is_in = (ep->bEndpointAddress & 0x80) != 0;
+                uint8_t ep_num = ep->bEndpointAddress & 0x0F;
+                
+                if (ep_type == 3 && is_in && bt_int_in_ep == 0) {
+                    bt_int_in_ep = ep_num;
+                    bt_int_in_mps = ep->wMaxPacketSize;
+                } else if (ep_type == 2 && !is_in && bt_bulk_out_ep == 0) {
+                    bt_bulk_out_ep = ep_num;
+                    bt_bulk_mps = ep->wMaxPacketSize;
+                } else if (ep_type == 2 && is_in && bt_bulk_in_ep == 0) {
+                    bt_bulk_in_ep = ep_num;
+                }
+            }
+            bt_ptr += bt_ptr[0];
+        }
+        
+        if (bt_int_in_ep && bt_bulk_out_ep && bt_bulk_in_ep) {
+            BluetoothHCI* bt = new BluetoothHCI(slot_id, xhci, 
+                bt_int_in_ep, bt_bulk_out_ep, bt_bulk_in_ep,
+                bt_int_in_mps, bt_bulk_mps, vid);
+            if (bt->init()) {
+                BluetoothL2CAP* l2cap = new BluetoothL2CAP(bt);
+                new BluetoothManager(bt, l2cap);
+            }
+        } else {
+            if (g_vga) g_vga->write("USB: BT endpoints not found!\n");
+        }
+        return; // Done with this device
     }
     
     // --- Step 2: Configuration Descriptor header (9 bytes) ---
@@ -225,7 +293,8 @@ void USBManager::enumerate_device(uint8_t slot_id, XHCI* xhci) {
         xhci->do_control_transfer(slot_id, 0xA1, 0x01, 0x0309, hid_intf_num, 64, reinterpret_cast<void*>(in_buf_phys));
         
         if (int_in_ep != 0) {
-            g_dualsense_driver = new DualSenseDriver(slot_id, int_in_ep, int_in_max_packet, xhci);
+            USBHIDTransport* transport = new USBHIDTransport(slot_id, int_in_ep, int_in_max_packet, xhci);
+            g_dualsense_driver = new DualSenseDriver(transport);
         } else {
             if (g_vga) g_vga->write("USB: DualSense Interrupt IN endpoint not found!\n");
         }
@@ -243,8 +312,25 @@ bool USBManager::has_pending_tasks() {
 
 void usb_thread_main() {
     while (1) {
-        if (g_usb_manager && g_usb_manager->has_pending_tasks()) g_usb_manager->update();
-        else scheduler_block_current_thread();
+        bool worked = false;
+        
+        if (g_usb_manager && g_usb_manager->has_pending_tasks()) {
+            g_usb_manager->update();
+            worked = true;
+        }
+        
+        if (g_bluetooth_manager) {
+            if (g_bluetooth_manager->update()) {
+                worked = true;
+            }
+        }
+        
+        if (!worked) {
+            scheduler_block_current_thread();
+        } else {
+            // Yield to avoid hogging CPU if we just polled BT
+            asm volatile("pause");
+        }
     }
 }
 

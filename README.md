@@ -16,6 +16,27 @@ The goal is not to replace desktop operating systems, but to build a console-lik
 
 We are building this from the absolute ground up! Right now, the foundation is coming together, but we are making the hard architectural choices now (like ditching legacy hardware) to ensure a faster gaming experience later.
 
+### Dependencies
+First, ensure you have the standard build tools installed:
+```bash
+sudo apt update
+sudo apt install build-essential qemu-system-x86 xorriso mtools bison flex libgmp3-dev libmpc-dev libmpfr-dev texinfo
+```
+
+### Cross-Compiler & Bootloader
+drakos requires a pure bare-metal `x86_64-elf` cross-compiler and the **Limine** bootloader. Since standard Linux compilers (`x86_64-linux-gnu-gcc`) add unwanted OS-specific overhead, **you must set these up locally** in the project directory.
+
+The `Makefile` expects them to be located in these exact folders in the project root:
+- `cross/` (for the cross-compiler, e.g. `cross/bin/x86_64-elf-g++`)
+- `limine-binary/` (for the bootloader files)
+
+**1. Build the `x86_64-elf` Toolchain:**
+Please follow the official [OSDev GCC Cross-Compiler Guide](https://wiki.osdev.org/GCC_Cross-Compiler) to build a toolchain for the `x86_64-elf` target. 
+Make sure to configure the `PREFIX` so that the binaries are installed directly into the `cross/` folder of this project.
+
+**2. Fetch Limine Bootloader:**
+Download a pre-built binary release from the [Limine GitHub repository](https://github.com/limine-bootloader/limine/releases) and extract the contents into the `limine-binary/` folder.
+
 ## 🤝 Contribution
 
 Right now, drakos is a passionate project driven by a very small core team (it's mostly just me right now!), and the road ahead is massive. 

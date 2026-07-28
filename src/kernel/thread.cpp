@@ -183,6 +183,10 @@ extern "C" Context* scheduler_switch(Context* current_context) {
     s_current_thread->state = THREAD_RUNNING;
     arch_restore_fpu(s_current_thread->fpu_state);
     
+    // Update global kernel RSP for syscall entry (Ring 3 -> Ring 0)
+    extern uint64_t g_kernel_rsp;
+    g_kernel_rsp = s_current_thread->kernel_stack;
+
     // Switch Page Table (PML4) if parent_process changed!
     if (s_current_thread->parent_process) {
         vmm_switch_address_space(s_current_thread->parent_process->page_table_phys);
