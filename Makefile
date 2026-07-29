@@ -166,7 +166,7 @@ clean: clean_userspace
 
 run: $(ISO) seed_disk
 	@sudo chmod 666 $(DISK_IMG) $(USB_IMG) $(NVME_IMG) 2>/dev/null || true
-	sudo qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom drakos.iso -m 256M -serial stdio \
+	qemu-system-x86_64 -cpu max -bios /usr/share/ovmf/OVMF.fd -cdrom drakos.iso -m 256M -serial stdio \
         -device qemu-xhci,id=xhci \
         -device usb-host,bus=xhci.0,vendorid=0x054c,productid=0x0ce6 \
         -device usb-host,bus=xhci.0,vendorid=0x8087,productid=0x0026 \
@@ -181,7 +181,7 @@ run: $(ISO) seed_disk
 
 
 debug: $(ISO) images seed_disk
-	sudo qemu-system-x86_64 \
+	qemu-system-x86_64 \
 		-cpu max \
 		-bios /usr/share/ovmf/OVMF.fd \
 		-cdrom $(ISO) \
