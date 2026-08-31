@@ -4,6 +4,15 @@ Welcome to **drakos**! 🎮
 
 drakos is an open-source, bare-metal operating system built in Rust (originally in C++)! 
 
+> [!WARNING]
+> **License Notice**
+>
+> drakos is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
+> You may use, modify, and redistribute the project under the terms of the license.
+> See the [`LICENSE`](../blob/main/LICENSE) file for the full license text.
+>
+> Contributions to drakos are also expected to be compatible with the project's GPL-3.0 license.
+
 
 ## 🎯 Our Vision
 
