@@ -2,7 +2,7 @@
 
 Welcome to **drakos**! 🎮
 
-drakos is an open-source, bare-metal operating system built in Rust (originally in C++)! 
+drakos is an open-source, Linux-based operating system focused on turning standard PCs into a console-like gaming environment! 
 
 > [!WARNING]
 > **License Notice**
@@ -16,18 +16,44 @@ drakos is an open-source, bare-metal operating system built in Rust (originally 
 
 ## 🎯 Our Vision
 
-drakos aims to turn a PC into a dedicated gaming machine by minimizing OS overhead and removing everything not required for gameplay (yes, literally a "gaming console").
+drakos aims to turn a standard PC into a **dedicated gaming machine**.
 
-The goal is not to replace desktop operating systems, but to build a console and controller first environment on standard PC hardware.
+Instead of providing a traditional desktop environment, drakos focuses on a simple, controller-friendly experience designed around launching and playing games.
+
+The goal is to:
+
+* minimize unnecessary background services and overhead
+* provide a fast boot-to-game experience
+* support standard PC hardware
+* provide a controller-first interface
+* keep the system lightweight and customizable
+* make the system feel more like a gaming console than a traditional desktop PC
+
+drakos is **not intended to replace general-purpose desktop Linux distributions**. It is designed around one thing:
+
+> **Turn on the PC → pick a game → play. 🎮**
+
+
+## 🏗️ Architecture
+
+drakos is built using established open-source technologies rather than implementing every operating-system component from scratch.
+Buildroot is used to build the complete system image, including the Linux kernel, base userspace, filesystem and required packages.
+
+This lets us focus our development effort on the parts that actually make drakos different.
+
 
 
 ## 🚀 The Journey So Far
 
+drakos originally started as a bare-metal OS project.
 
-> [!IMPORTANT]
-> ℹ️ This section is still under work, development has barely just started.
+The first implementation attempted to provide its own kernel and hardware support from scratch. While this was a great learning experience, it also meant that even basic functionality required implementing enormous amounts of low-level infrastructure.
 
-We are starting the project as a translation of the old C++ version and we will be expanding further in the future!
+The project is now moving toward a Linux-based architecture.
+
+This allows us to keep the ambitious goal of creating a gaming-focused operating system while benefiting from Linux's existing hardware support, drivers and ecosystem.
+
+Development is still in its early stages.
 
 
 
@@ -35,6 +61,24 @@ We are starting the project as a translation of the old C++ version and we will 
 
 > [!IMPORTANT]
 > ℹ️ This section is still under work, development has barely just started.
+
+The system will be built using Buildroot.
+
+The general build process will eventually look something like:
+
+```bash
+git clone drakos
+cd drakos
+```
+
+```bash
+make menuconfig
+make
+```
+
+The resulting image will be usable in a virtual machine and, eventually, on real x86_64 hardware.
+
+Detailed build and development instructions will be added as the project architecture stabilizes.
 
 
 ## 🤝 Contribution
@@ -44,10 +88,15 @@ Right now, drakos is a passionate project driven by a very small core team (just
 If you love low-level programming, graphics engines, or just want to be part of building something crazy and ambitious, **We need your help!**
 
 We are especially looking for contributors who can help with:
-- **USB Stack Development (xHCI):** Getting Xbox, PlayStation, and generic Bluetooth controllers to talk directly to our kernel.
-- **2D/3D Graphics & Compositing:** Pushing pixels to the screen as fast as possible without a bloated desktop environment.
-- **Audio Drivers:** Because gaming without sound isn't gaming.
-- **Testing & Ideas:** Running drakos on real hardware, finding bugs, and brainstorming the UI.
+* 🎮 Gaming-focused UI and UX
+* 🖥️ Graphics and display support
+* 🎧 Audio
+* 🎮 Controller support
+* ⚙️ Linux/Buildroot integration
+* 🚀 Boot and startup optimization
+* 📦 System configuration and packaging
+* 🧪 Testing on real hardware
+* 💡 Ideas for the overall system design
 
 Whether you're a seasoned kernel hacker or a developer looking for a fun challenge, drop into our discussions, open an issue, or submit a pull request! 
 ### **Let's build the ultimate gaming OS together.**
