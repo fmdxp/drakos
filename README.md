@@ -7,7 +7,7 @@ Welcome to **drakos**! 🎮
 drakos is an open-source, bare-metal operating system built from scratch in C++. 
 
 > [!WARNING]
-> ⚠️ This implementation of drakos has been stopped and a new rewrite has been started in rust instead. This is a major change in the OS and couldn't have been just pushed. This repo is UNACTIVE and ARCHIVED, expect no updates. Look at the new repo instead.
+> ⚠️ I'm restarting the implementation in C++, I wasn't able to restart a project this big, so I'm continuing this in the hopes of achieving my goal.
 
 ## 🎯 Our Vision
 
