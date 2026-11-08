@@ -38,6 +38,7 @@ class Process {
 public:
     Process();
     ~Process();
+    bool destroy();
 
     // Process ID
     uint64_t pid;
@@ -78,12 +79,14 @@ public:
 
     // Base address of the stack in Kernel mode
     uintptr_t kernel_stack;
+    uintptr_t kernel_stack_base;
 
     // Buffer for FPU/AVX512 state, 64-byte aligned
     uint8_t fpu_state[FPU_STATE_SIZE] __attribute__((aligned(64)));
 
     // Thread state (e.g., Ready, Running, Blocked)
     ThreadState state;
+    bool address_space_retained;
     
     // Simple Round-Robin scheduler link
     Thread* next;

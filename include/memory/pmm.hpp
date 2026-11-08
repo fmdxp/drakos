@@ -53,6 +53,9 @@ inline void      pmm_free_page(uintptr_t addr) { pmm_free(addr, 0); }
 // To turn a physical address into a virtual one: virt = phys + pmm_hhdm_offset()
 uint64_t pmm_hhdm_offset();
 
+// True only when phys_addr is the head of a currently allocated order-0 page.
+bool pmm_is_allocated_page(uintptr_t phys_addr);
+
 // -------------------------------------------------------------------
 // PMM MODULE
 // Registered at level 2_mem_a (first memory module to run)

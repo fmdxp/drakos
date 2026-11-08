@@ -119,7 +119,8 @@ bool PCI::configure_msi(uint8_t bus, uint8_t device, uint8_t func, uint8_t vecto
             
             // Ensure the MSI-X table is mapped in the HHDM
             uintptr_t table_virt = table_phys + pmm_hhdm_offset();
-            vmm_map(table_virt & ~0xFFFULL, table_phys & ~0xFFFULL, VMM_MMIO);
+            if (vmm_map_mmio_page(table_virt & ~0xFFFULL,
+                                  table_phys & ~0xFFFULL) != VmmMapResult::Success) return false;
             
             // Write Entry 0
             volatile uint32_t* msix_table = reinterpret_cast<volatile uint32_t*>(table_virt);
@@ -271,4 +272,5 @@ const char* PCI::get_name() const {
 }
 
 // We register this at level 4, alongside other device drivers
-REGISTER_MODULE(g_pci, PCI, 4_dev);
+static const char* const kPciDependencies[] = {"g_pmm", "g_vmm", "g_heap"};
+REGISTER_MODULE_OPTIONAL(g_pci, PCI, 4_dev, kPciDependencies);

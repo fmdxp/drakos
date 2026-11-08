@@ -295,18 +295,25 @@ void XHCI::send_command(const TRB& trb) {
 }
 
 bool XHCI::start() {
+    m_failure_reason = "PCI subsystem is unavailable";
     if (!g_pci) return false;
     
     uintptr_t phys_bar = g_pci->get_xhci_bar();
-    if (phys_bar == 0) return false; // No xHCI found
+    m_failure_reason = "no xHCI controller was found";
+    if (phys_bar == 0) return false;
     
     m_mmio_base = phys_bar + pmm_hhdm_offset();
 
     // The bootloader HHDM only maps RAM, not MMIO!
     // We MUST map the xHCI MMIO space explicitly to prevent a Page Fault.
     // We'll map 4 pages (16KB) to be safe for capability + operational + runtime registers.
-    for (int i = 0; i < 4; i++) {
-        vmm_map(m_mmio_base + (i * 4096), phys_bar + (i * 4096), VMM_MMIO);
+    int mapped_mmio_pages = 0;
+    for (; mapped_mmio_pages < 4; mapped_mmio_pages++) {
+        if (vmm_map_mmio_page(m_mmio_base + (mapped_mmio_pages * 4096),
+                              phys_bar + (mapped_mmio_pages * 4096)) != VmmMapResult::Success) {
+            m_failure_reason = "xHCI MMIO mapping failed";
+            return false;
+        }
     }
     
     // Parse capabilities
@@ -316,18 +323,24 @@ bool XHCI::start() {
     m_max_slots = params1 & 0xFF;
     m_max_ports = (params1 >> 24) & 0xFF;
     
+    m_failure_reason = "xHCI controller reset failed";
     if (!reset_controller()) return false;
+    m_failure_reason = "xHCI data structure allocation failed";
     if (!initialize_data_structures()) return false;
+    m_failure_reason = "xHCI interrupter setup failed";
     if (!configure_interrupter()) return false;
 
     // Configure MSI (Route to Vector 40)
     PCIDevice pci_dev = g_pci->get_xhci_device();
+    m_failure_reason = "xHCI MSI configuration failed";
     if (!g_pci->configure_msi(pci_dev.bus, pci_dev.device, pci_dev.function, 40)) return false;
+    m_failure_reason = "xHCI controller start failed";
     if (!start_controller()) return false;
 
     // Detect connected devices immediately after starting
     enumerate_ports();
 
+    m_failure_reason = "xHCI initialization failed";
     return true;
 }
 
@@ -818,4 +831,5 @@ extern "C" void xhci_handle_interrupt() {
 }
 
 // Register as level 5 (after basic dev/pci)
-REGISTER_MODULE(g_xhci, XHCI, 5_usb);
+static const char* const kXhciDependencies[] = {"g_pci", "g_pmm", "g_vmm", "g_heap", "g_lapic", "g_idt"};
+REGISTER_MODULE_OPTIONAL(g_xhci, XHCI, 5_usb, kXhciDependencies);

@@ -25,3 +25,6 @@ extern volatile struct limine_memmap_request g_memmap_request;
 extern volatile struct limine_hhdm_request   g_hhdm_request;
 extern volatile struct limine_framebuffer_request g_framebuffer_request;
 extern volatile struct limine_rsdp_request   g_rsdp_request;
+extern volatile struct limine_executable_cmdline_request g_cmdline_request;
+
+extern volatile struct limine_mp_request g_mp_request;

@@ -184,4 +184,5 @@ const char* Keyboard::get_name() const {
 }
 
 // We register this at level 4, after APIC and IDT are initialized
-REGISTER_MODULE(g_keyboard, Keyboard, 4_dev);
+static const char* const kKeyboardDependencies[] = {"g_idt", "g_ioapic", "g_lapic"};
+REGISTER_MODULE_OPTIONAL(g_keyboard, Keyboard, 4_dev, kKeyboardDependencies);

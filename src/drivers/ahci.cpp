@@ -22,6 +22,7 @@
 #include "vmm.hpp"
 #include "vga.hpp"
 #include "pmm.hpp"
+#include "kernel/boot_diagnostics.hpp"
 #include "fs/fat32.hpp"
 #include "fs/vfs.hpp"
 #include "fs/vfs_fat32.hpp"
@@ -36,25 +37,99 @@ namespace AHCI {
 #define HBA_PORT_DET_PRESENT 3
 #define HBA_PORT_IPM_ACTIVE  1
 
+static void diagnostics_write_hex(uint64_t value) {
+    static constexpr char digits[] = "0123456789ABCDEF";
+    char text[19] = "0x0000000000000000";
+    for (int i = 0; i < 16; ++i) {
+        text[17 - i] = digits[value & 0xF];
+        value >>= 4;
+    }
+    boot_diagnostics_write(text);
+}
+
 bool AHCIDriver::start() {
-    // Log rimosso
+    m_failure_reason = "PCI subsystem is unavailable";
     if (!g_pci) {
         if (g_vga) g_vga->write("AHCI: g_pci is NULL!\n");
         return false;
     }
     uintptr_t abar_phys = g_pci->get_ahci_bar();
+    m_failure_reason = "no AHCI controller was found";
     if (abar_phys == 0) {
         if (g_vga) g_vga->write("AHCI: No AHCI controller found.\n");
         return false;
     }
 
-    // Map the entire ABAR region (multiple pages) with cache-disable
-    for (int i = 0; i < 8; i++) {
-        uintptr_t p = (abar_phys & ~0xFFFULL) + (i * 4096);
-        vmm_map(p + pmm_hhdm_offset(), p, VMM_MMIO);
+    const uintptr_t abar_page = abar_phys & ~(PAGE_SIZE - 1);
+    const uintptr_t abar_offset = abar_phys & (PAGE_SIZE - 1);
+    uintptr_t abar_virt = abar_page + pmm_hhdm_offset();
+    VmmMappingInfo existing_mapping = {};
+    bool had_hhdm_mapping = vmm_query_mapping(abar_virt, &existing_mapping);
+    bool mapping_is_suitable = false;
+    if (had_hhdm_mapping) {
+        if (existing_mapping.physical_page != abar_page) {
+            m_failure_reason = "AHCI BAR conflicts with an existing physical mapping";
+            return false;
+        }
+        const bool pat_set = existing_mapping.page_size == PAGE_SIZE
+            ? (existing_mapping.flags & (1ULL << 7)) != 0
+            : (existing_mapping.flags & (1ULL << 12)) != 0;
+        mapping_is_suitable =
+            (existing_mapping.flags & (VMM_PRESENT | VMM_WRITE | VMM_CACHE_DISABLE)) == VMM_MMIO &&
+            !(existing_mapping.flags & VMM_USER) && !pat_set;
+
+        const char* page_size_name = existing_mapping.page_size == (1ULL << 30) ? "1 GiB" :
+                                     existing_mapping.page_size == (1ULL << 21) ? "2 MiB" : "4 KiB";
+        boot_diagnostics_write("AHCI: HHDM entry phys=");
+        diagnostics_write_hex(existing_mapping.physical_page);
+        boot_diagnostics_write(" flags=");
+        diagnostics_write_hex(existing_mapping.flags);
+        boot_diagnostics_write(" page-size=");
+        boot_diagnostics_write(page_size_name);
+        boot_diagnostics_write("\n");
+        if (mapping_is_suitable) {
+            boot_diagnostics_write("AHCI: reusing suitable HHDM MMIO mapping (page size ");
+        } else {
+            boot_diagnostics_write("AHCI: converting HHDM mapping to MMIO attributes (page size ");
+        }
+        boot_diagnostics_write(page_size_name);
+        boot_diagnostics_write(")\n");
+    } else {
+        boot_diagnostics_write("AHCI: no HHDM mapping covers the ABAR page\n");
+    }
+    VmmMapResult map_result = mapping_is_suitable
+        ? VmmMapResult::Success
+        : vmm_map_mmio_page(abar_virt, abar_page);
+    if (map_result != VmmMapResult::Success) {
+        m_failure_reason = map_result == VmmMapResult::PageTableOutOfMemory
+            ? "AHCI MMIO page-table allocation failed"
+            : map_result == VmmMapResult::MappingExists
+                ? "AHCI BAR conflicts with an existing physical mapping"
+                : "AHCI MMIO mapping is unsupported or invalid";
+        return false;
     }
 
-    m_hba = reinterpret_cast<HBAMemory*>(abar_phys + pmm_hhdm_offset());
+    m_hba = reinterpret_cast<HBAMemory*>(abar_virt + abar_offset);
+    const uint32_t implemented_ports = m_hba->pi;
+    size_t register_bytes = 0x100;
+    for (size_t port = 0; port < 32; ++port) {
+        if (implemented_ports & (1U << port)) {
+            register_bytes = 0x100 + (port + 1) * sizeof(HBAPort);
+        }
+    }
+    size_t abar_pages = (abar_offset + register_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (size_t page = 1; page < abar_pages; ++page) {
+        uintptr_t page_phys = abar_page + page * PAGE_SIZE;
+        map_result = vmm_map_mmio_page(abar_virt + page * PAGE_SIZE, page_phys);
+        if (map_result != VmmMapResult::Success) {
+            m_failure_reason = map_result == VmmMapResult::PageTableOutOfMemory
+                ? "AHCI MMIO page-table allocation failed"
+                : map_result == VmmMapResult::MappingExists
+                    ? "AHCI BAR conflicts with an existing physical mapping"
+                    : "AHCI MMIO mapping is unsupported or invalid";
+            return false;
+        }
+    }
 
     // AHCI BIOS/OS Handoff (AHCI spec sec 10.7.2) - take ownership from BIOS
     if (m_hba->cap2 & (1 << 0)) { // BOH supported
@@ -67,7 +142,7 @@ bool AHCIDriver::start() {
     // UEFI already initialized the ports and link detection - we just take over
     m_hba->ghc |= (1 << 31);
 
-    // Log rimosso
+    m_failure_reason = "AHCI controller initialization failed";
 
     uint32_t pi = m_hba->pi;
     for (int i = 0; i < 32; i++) {
@@ -76,6 +151,7 @@ bool AHCIDriver::start() {
         }
     }
 
+    m_failure_reason = "AHCI initialization failed";
     return true;
 }
 
@@ -91,15 +167,15 @@ void AHCIDriver::check_port(HBAPort* port, int port_no) {
     if (ipm != HBA_PORT_IPM_ACTIVE) return;
 
     if (port->sig == SATA_SIG_ATA) {
-        port_rebase(port, port_no);
+        if (!port_rebase(port, port_no)) return;
         
         // Test reading the first sector!
         AHCIDisk* disk = new AHCIDisk(port);
         
-        // Alloca il buffer con cache-disable per garantire coerenza DMA
+        // Use the HHDM mapping for the PMM-owned DMA buffer.
         uintptr_t buf_phys = pmm_alloc_page();
+        if (!buf_phys) return;
         uintptr_t buf_virt = buf_phys + pmm_hhdm_offset();
-        vmm_map(buf_virt & ~0xFFFULL, buf_phys, VMM_MMIO);
         uint8_t* buffer = reinterpret_cast<uint8_t*>(buf_virt);
         for (int i = 0; i < 512; i++) buffer[i] = 0;
         
@@ -126,7 +202,7 @@ void AHCIDriver::check_port(HBAPort* port, int port_no) {
     }
 }
 
-void AHCIDriver::port_rebase(HBAPort* port, int port_no) {
+bool AHCIDriver::port_rebase(HBAPort* port, int port_no) {
     (void)port_no;
     // Stop the port command engine
     port->cmd &= ~(1 << 0); // ST = 0
@@ -140,11 +216,11 @@ void AHCIDriver::port_rebase(HBAPort* port, int port_no) {
 
     // --- Allocate Command List (1K) + FIS (256B) in one page ---
     uintptr_t cl_phys = pmm_alloc_page();
+    if (!cl_phys) return false;
     uintptr_t cl_virt = cl_phys + pmm_hhdm_offset();
     // Zero it
     for (int i = 0; i < 4096; i++) ((uint8_t*)cl_virt)[i] = 0;
-    // Map with cache-disable so DMA writes are immediately visible
-    vmm_map(cl_virt & ~0xFFFULL, cl_phys, VMM_MMIO);
+    // The PMM page is already mapped through the HHDM.
 
     port->clb  = (uint32_t)(cl_phys & 0xFFFFFFFF);
     port->clbu = (uint32_t)(cl_phys >> 32);
@@ -155,11 +231,13 @@ void AHCIDriver::port_rebase(HBAPort* port, int port_no) {
 
     // --- Allocate Command Tables: 32 slots x 256 bytes = 8KB (order-1 = 2 pages) ---
     uintptr_t ct_phys = pmm_alloc(1);
+    if (!ct_phys) {
+        pmm_free_page(cl_phys);
+        return false;
+    }
     uintptr_t ct_virt = ct_phys + pmm_hhdm_offset();
     for (int i = 0; i < 8192; i++) ((uint8_t*)ct_virt)[i] = 0;
-    // Map both pages with cache-disable
-    vmm_map(ct_virt & ~0xFFFULL,        ct_phys,        VMM_MMIO);
-    vmm_map((ct_virt & ~0xFFFULL) + 4096, ct_phys + 4096, VMM_MMIO);
+    // The contiguous PMM allocation is already mapped through the HHDM.
 
     // Set Command Table Base Address for each of the 32 command slots
     HBACommandHeader* cmdhdr = reinterpret_cast<HBACommandHeader*>(cl_virt);
@@ -177,11 +255,13 @@ void AHCIDriver::port_rebase(HBAPort* port, int port_no) {
     // Restart command engine
     port->cmd |= (1 << 4); // FRE = 1
     port->cmd |= (1 << 0); // ST  = 1
+    return true;
 }
 
 } // namespace AHCI
 
-REGISTER_MODULE(g_ahci_driver, AHCI::AHCIDriver, 5_usb);
+static const char* const kAhciDependencies[] = {"g_pci", "g_pmm", "g_vmm", "g_heap"};
+REGISTER_MODULE_OPTIONAL(g_ahci_driver, AHCI::AHCIDriver, 5_usb, kAhciDependencies);
 
 namespace AHCI {
 

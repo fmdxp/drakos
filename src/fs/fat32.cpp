@@ -26,6 +26,11 @@ extern VGA* g_vga;
 
 namespace FAT32 {
 
+static uint8_t* alloc_hhdm_page() {
+    uintptr_t phys = pmm_alloc_page();
+    return phys ? reinterpret_cast<uint8_t*>(phys + pmm_hhdm_offset()) : nullptr;
+}
+
 FAT32Driver::FAT32Driver(FS::BlockDevice* dev) : m_dev(dev) {}
 
 // Read sectors from device via the block device interface
@@ -161,8 +166,8 @@ uint32_t FAT32Driver::allocate_cluster(uint32_t last_cluster) {
         if (next_cluster(c) == FAT32_FREE) {
             write_fat_entry(c, FAT32_EOC);
             
-            uint8_t* zero_buf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-            vmm_map((uintptr_t)zero_buf & ~0xFFFULL, (uintptr_t)zero_buf - pmm_hhdm_offset(), VMM_MMIO);
+            uint8_t* zero_buf = alloc_hhdm_page();
+            if (!zero_buf) return 0;
             for (uint32_t i=0; i < m_sectors_per_cluster * 512; i++) zero_buf[i] = 0;
             write_cluster(c, zero_buf);
             
@@ -176,8 +181,8 @@ uint32_t FAT32Driver::allocate_cluster(uint32_t last_cluster) {
 }
 
 bool FAT32Driver::update_dir_entry(uint32_t dir_cluster, const char* name83, uint32_t new_size, uint32_t new_first_cluster) {
-    uint8_t* cluster_buf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-    vmm_map((uintptr_t)cluster_buf & ~0xFFFULL, (uintptr_t)cluster_buf - pmm_hhdm_offset(), VMM_MMIO);
+    uint8_t* cluster_buf = alloc_hhdm_page();
+    if (!cluster_buf) return false;
 
     uint32_t cluster = dir_cluster;
     while (cluster < FAT32_EOC) {
@@ -243,9 +248,8 @@ void FAT32Driver::list_root() {
     
     // Allocate one cluster buffer (max 4KB for 8 sectors/cluster)
     // We'll use a static 4096-byte buffer
-    uint8_t* cluster_buf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-    vmm_map((uintptr_t)cluster_buf & ~0xFFFULL, 
-            (uintptr_t)cluster_buf - pmm_hhdm_offset(), VMM_MMIO);
+    uint8_t* cluster_buf = alloc_hhdm_page();
+    if (!cluster_buf) return;
     
     uint32_t cluster = m_root_cluster;
     while (cluster < FAT32_EOC) {
@@ -285,9 +289,8 @@ done:;
 }
 
 bool FAT32Driver::read_file(const char* name, void* buf, uint32_t max_size, uint32_t& out_size) {
-    uint8_t* cluster_buf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-    vmm_map((uintptr_t)cluster_buf & ~0xFFFULL,
-            (uintptr_t)cluster_buf - pmm_hhdm_offset(), VMM_MMIO);
+    uint8_t* cluster_buf = alloc_hhdm_page();
+    if (!cluster_buf) return false;
     
     uint32_t cluster = m_root_cluster;
     DirEntry found_entry = {};
@@ -357,9 +360,8 @@ void FAT32Driver::build_83(const DirEntry* e, char* buf) {
 
 bool FAT32Driver::lookup_entry(uint32_t dir_cluster, const char* name83,
                                 uint32_t& out_cluster, uint32_t& out_size, bool& out_is_dir) {
-    uint8_t* cluster_buf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-    vmm_map((uintptr_t)cluster_buf & ~0xFFFULL,
-            (uintptr_t)cluster_buf - pmm_hhdm_offset(), VMM_MMIO);
+    uint8_t* cluster_buf = alloc_hhdm_page();
+    if (!cluster_buf) return false;
 
     // "." means the directory itself — return it as-is
     if (name83[0] == '.' && name83[1] == '\0') {
@@ -398,9 +400,8 @@ int FAT32Driver::read_at(uint32_t first_cluster, uint32_t file_size,
     if (size == 0) return 0;
 
     uint32_t cluster_bytes = m_sectors_per_cluster * 512;
-    uint8_t* cluster_buf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-    vmm_map((uintptr_t)cluster_buf & ~0xFFFULL,
-            (uintptr_t)cluster_buf - pmm_hhdm_offset(), VMM_MMIO);
+    uint8_t* cluster_buf = alloc_hhdm_page();
+    if (!cluster_buf) return -1;
 
     // Skip clusters before 'offset'
     uint32_t skip_clusters = offset / cluster_bytes;
@@ -435,9 +436,8 @@ bool FAT32Driver::listdir_cluster(uint32_t dir_cluster,
     DirEnum* entries,
     uint32_t max, uint32_t& count) {
 
-    uint8_t* cluster_buf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-    vmm_map((uintptr_t)cluster_buf & ~0xFFFULL,
-            (uintptr_t)cluster_buf - pmm_hhdm_offset(), VMM_MMIO);
+    uint8_t* cluster_buf = alloc_hhdm_page();
+    if (!cluster_buf) return false;
 
     count = 0;
     uint32_t cluster = dir_cluster;
@@ -472,8 +472,8 @@ int FAT32Driver::write_at(uint32_t first_cluster, uint32_t file_size,
     uint32_t end_offset = offset + size;
     uint32_t new_file_size = (end_offset > file_size) ? end_offset : file_size;
     
-    uint8_t* cluster_buf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-    vmm_map((uintptr_t)cluster_buf & ~0xFFFULL, (uintptr_t)cluster_buf - pmm_hhdm_offset(), VMM_MMIO);
+    uint8_t* cluster_buf = alloc_hhdm_page();
+    if (!cluster_buf) return -1;
 
     if (first_cluster == 0) {
         first_cluster = allocate_cluster(0);
@@ -534,8 +534,8 @@ int FAT32Driver::write_at(uint32_t first_cluster, uint32_t file_size,
 }
 
 bool FAT32Driver::create_entry(uint32_t dir_cluster, const char* name83, bool is_dir, uint32_t& out_cluster) {
-    uint8_t* cluster_buf = (uint8_t*)(pmm_alloc_page() + pmm_hhdm_offset());
-    vmm_map((uintptr_t)cluster_buf & ~0xFFFULL, (uintptr_t)cluster_buf - pmm_hhdm_offset(), VMM_MMIO);
+    uint8_t* cluster_buf = alloc_hhdm_page();
+    if (!cluster_buf) return false;
 
     uint32_t cluster = dir_cluster;
     uint32_t last_cluster = cluster;

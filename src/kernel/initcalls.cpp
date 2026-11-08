@@ -1,58 +1,70 @@
-/*
- * drakos - An x64 UEFI gaming OS inspired by the architecture and user experience of modern consoles.
- * Copyright (C) 2026 fmdxp
- * 
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- * 
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- * 
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-
 #include "module.hpp"
+#include "kernel/boot_diagnostics.hpp"
 
-// Extern symbols from linker script
-extern "C" initcall_t __initcalls_1_core_start[];
-extern "C" initcall_t __initcalls_1_core_end[];
-extern "C" initcall_t __initcalls_2_mem_a_start[];  // PMM
-extern "C" initcall_t __initcalls_2_mem_a_end[];
-extern "C" initcall_t __initcalls_2_mem_b_start[];  // VMM
-extern "C" initcall_t __initcalls_2_mem_b_end[];
-extern "C" initcall_t __initcalls_2_mem_c_start[];  // Heap
-extern "C" initcall_t __initcalls_2_mem_c_end[];
-extern initcall_t __initcalls_3_drv_start[];
-extern initcall_t __initcalls_3_drv_end[];
+extern "C" const InitcallDescriptor __initcalls_start[];
+extern "C" const InitcallDescriptor __initcalls_end[];
 
-extern initcall_t __initcalls_4_dev_start[];
-extern initcall_t __initcalls_4_dev_end[];
+static InitcallRecord s_records[INITCALL_MAX_COUNT];
 
-extern initcall_t __initcalls_5_usb_start[];
-extern initcall_t __initcalls_5_usb_end[];
-
-static void execute_initcalls(initcall_t* start, initcall_t* end) {
-    for (initcall_t* call = start; call < end; call++) {
-        bool success = (*call)();
-        if (!success) {
-            // Module failed and detached itself. 
-            // In the future, we could log this to the screen.
-        }
-    }
+static uint64_t read_tsc() {
+    uint32_t low, high;
+    asm volatile("rdtsc" : "=a"(low), "=d"(high));
+    return (static_cast<uint64_t>(high) << 32) | low;
 }
 
-void system_init_modules() {
-    execute_initcalls(__initcalls_1_core_start, __initcalls_1_core_end);
-    execute_initcalls(__initcalls_2_mem_a_start, __initcalls_2_mem_a_end); // PMM first
-    execute_initcalls(__initcalls_2_mem_b_start, __initcalls_2_mem_b_end);
-    execute_initcalls(__initcalls_2_mem_c_start, __initcalls_2_mem_c_end);
-    execute_initcalls(__initcalls_3_drv_start, __initcalls_3_drv_end);
-    execute_initcalls(__initcalls_4_dev_start, __initcalls_4_dev_end);
-    execute_initcalls(__initcalls_5_usb_start, __initcalls_5_usb_end);
+static void append_text(char* out, size_t& len, const char* text, size_t capacity) {
+    if (!text) return;
+    while (*text && len + 1 < capacity) out[len++] = *text++;
+    out[len] = '\0';
+}
+
+static void append_uint(char* out, size_t& len, uint64_t value, size_t capacity) {
+    char digits[24];
+    size_t count = 0;
+    do {
+        digits[count++] = static_cast<char>('0' + (value % 10));
+        value /= 10;
+    } while (value && count < sizeof(digits));
+    while (count && len + 1 < capacity) out[len++] = digits[--count];
+    out[len] = '\0';
+}
+
+static void report_initcall(const InitcallRecord& record) {
+    char line[256] = {};
+    size_t len = 0;
+    append_text(line, len, "initcall ", sizeof(line));
+    append_text(line, len, record.descriptor->name, sizeof(line));
+    append_text(line, len, ": ", sizeof(line));
+    append_text(line, len, initcall_status_name(record.status), sizeof(line));
+    append_text(line, len, " (", sizeof(line));
+    append_uint(line, len, record.duration_ticks, sizeof(line));
+    append_text(line, len, " TSC ticks)", sizeof(line));
+    if (record.error) {
+        append_text(line, len, " — ", sizeof(line));
+        append_text(line, len, record.error, sizeof(line));
+    }
+    append_text(line, len, "\n", sizeof(line));
+    boot_diagnostics_write(line);
+}
+
+InitcallSummary system_init_modules() {
+    size_t count = static_cast<size_t>(__initcalls_end - __initcalls_start);
+    InitcallSummary summary = initcall_run_all(__initcalls_start, count, s_records,
+                                                INITCALL_MAX_COUNT, read_tsc);
+
+    boot_diagnostics_write("drakos boot diagnostics\n");
+    for (size_t i = 0; i < summary.count; ++i) report_initcall(s_records[i]);
+
+    char totals[128] = {};
+    size_t len = 0;
+    append_text(totals, len, "initcalls: ", sizeof(totals));
+    append_uint(totals, len, summary.succeeded, sizeof(totals));
+    append_text(totals, len, " succeeded, ", sizeof(totals));
+    append_uint(totals, len, summary.optional_failures, sizeof(totals));
+    append_text(totals, len, " optional failures, ", sizeof(totals));
+    append_uint(totals, len, summary.mandatory_failures, sizeof(totals));
+    append_text(totals, len, " mandatory failures\n", sizeof(totals));
+    boot_diagnostics_write(totals);
+
+    return summary;
 }

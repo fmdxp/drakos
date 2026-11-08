@@ -20,12 +20,11 @@
 #include "panic.hpp"
 #include "vga.hpp"
 #include "serial.hpp"
+#include "kernel/boot_diagnostics.hpp"
 
 // Helper to write to both VGA and Serial
 static void panic_print(const char* str) {
-    
-    if (g_vga) g_vga->write(str);
-    if (g_serial) g_serial->write(str);
+    boot_diagnostics_write_force(str);
 }
 
 // Helper to print hex values
@@ -35,8 +34,8 @@ static void panic_print_hex(uint64_t val, int digits) {
         uint8_t nibble = (val >> (i * 4)) & 0x0F;
         char c = (nibble < 10) ? ('0' + nibble) : ('A' + (nibble - 10));
         
-        if (g_vga) g_vga->write_char(c);
-        if (g_serial) g_serial->write_char(c);
+        if (g_vga) g_vga->write_char_raw(c);
+        if (g_serial) g_serial->write_char_raw(c);
     }
 }
 
@@ -53,13 +52,20 @@ static volatile int s_panic_lock = 0;
     
 
     panic_print("\n\n=======================================\n");
-    panic_print("             KERNEL PANIC\n");
+    panic_print("             drakos halted\n");
     panic_print("=======================================\n");
-    panic_print("Reason: ");
-    panic_print(message);
-    panic_print("\n\n");
+    panic_print("The system stopped after a fatal error.\n");
 
-    if (frame) {
+    bool detailed = boot_diagnostics_visible();
+    if (detailed) {
+        panic_print("Reason: ");
+        panic_print(message);
+        panic_print("\n\n");
+    } else {
+        panic_print("Restart and select Recovery for diagnostic details.\n\n");
+    }
+
+    if (frame && detailed) {
         panic_print("--- CPU State Dump ---\n");
         panic_print("RIP: "); panic_print_hex(frame->rip, 16);
         panic_print("  CS: "); panic_print_hex(frame->cs, 4); panic_print("\n");
@@ -76,7 +82,8 @@ static volatile int s_panic_lock = 0;
         panic_print("----------------------\n");
     }
 
-    panic_print("\nSystem Halted.");
+    if (detailed) boot_diagnostics_dump();
+    panic_print("\nSystem halted.");
 
     // Halt forever
     while (true) {

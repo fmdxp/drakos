@@ -20,3 +20,5 @@
 #pragma once
 
 void enable_fpu_and_avx();
+bool enable_nx();
+bool nx_enabled();

@@ -49,3 +49,18 @@ volatile struct limine_rsdp_request g_rsdp_request =
     .revision = 0,
     .response = nullptr
 };
+
+volatile struct limine_executable_cmdline_request g_cmdline_request =
+{
+    .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr
+};
+
+
+volatile struct limine_mp_request g_mp_request = {
+    .id = LIMINE_MP_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr,
+    .flags = 0,
+};

@@ -28,6 +28,7 @@
 
 // Allocate 'size' bytes of memory. Returns nullptr if out of memory.
 void* kmalloc(size_t size);
+void* kmalloc_aligned(size_t size, size_t alignment);
 
 // Free memory previously allocated by kmalloc.
 void  kfree(void* ptr);

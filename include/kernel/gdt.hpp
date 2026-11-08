@@ -65,6 +65,7 @@ public:
     
     // Updates RSP0 in the TSS for the current thread
     void set_kernel_stack(uintptr_t stack);
+    void load_cpu_descriptors();
 
 private:
     void set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags);
@@ -75,3 +76,5 @@ private:
     GDTPointer pointer;
     TSSEntry tss;
 };
+
+extern GDT* g_gdt;

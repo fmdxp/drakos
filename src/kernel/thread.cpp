@@ -21,6 +21,8 @@
 #include "vmm.hpp"
 #include "pmm.hpp"
 #include "gdt.hpp"
+#include "kernel/smp.hpp"
+#include "cpu.hpp"
 #include <stddef.h>
 
 extern GDT* g_gdt;
@@ -29,6 +31,7 @@ extern GDT* g_gdt;
 static Thread* s_current_thread     = nullptr;
 static Thread* s_idle_thread        = nullptr;
 static Thread* s_last_normal_thread = nullptr;
+static Thread* s_retired_threads    = nullptr;
 
 
 static void idle_main() {
@@ -46,16 +49,35 @@ Process::Process() {
 }
 
 Process::~Process() {
+    destroy();
+}
+
+bool Process::destroy() {
+    if (!is_user || !page_table_phys) return true;
+    VmmAddressSpaceResult result = vmm_destroy_address_space(page_table_phys);
+    if (result != VmmAddressSpaceResult::Success) return false;
+    page_table_phys = vmm_get_kernel_pml4();
+    is_user = false;
+    return true;
 }
 
 Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unused]] const char* const thread_name) {
     static uint64_t next_tid = 1;
     tid = next_tid++;
     parent_process = parent;
+    address_space_retained = false;
     state = THREAD_READY; // Ready
+    kernel_stack_base = 0;
+    kernel_stack = 0;
+    context = nullptr;
     
     // Allocate a 16KB kernel stack
     uint8_t* stack = new uint8_t[16384];
+    if (!stack) {
+        state = THREAD_DEAD;
+        return;
+    }
+    kernel_stack_base = reinterpret_cast<uintptr_t>(stack);
     
     // The top of the stack (stack grows downwards)
     uint64_t stack_top = (uint64_t)stack + 16384;
@@ -80,13 +102,34 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
         context->rflags = 0x202; // IF (Interrupts enabled)
         
         // Give this user process its own isolated address space
+        if (!parent_process) {
+            state = THREAD_DEAD;
+            return;
+        }
         parent_process->is_user = true;
         parent_process->page_table_phys = vmm_create_address_space();
+        if (!parent_process->page_table_phys) {
+            state = THREAD_DEAD;
+            return;
+        }
         
         // Allocate User Stack (1 Page = 4KB) at 0x00007FFFF0000000
         uintptr_t user_stack_phys = pmm_alloc_page();
+        if (!user_stack_phys) {
+            parent_process->destroy();
+            state = THREAD_DEAD;
+            return;
+        }
         uintptr_t user_stack_virt = 0x00007FFFF0000000 - 4096;
-        vmm_map_page(parent_process->page_table_phys, user_stack_virt, user_stack_phys, VMM_PRESENT | VMM_WRITE | VMM_USER);
+        uint64_t stack_flags = VMM_PRESENT | VMM_WRITE | VMM_USER;
+        if (nx_enabled()) stack_flags |= VMM_NX;
+        if (vmm_map_owned_page(parent_process->page_table_phys, user_stack_virt, user_stack_phys,
+                               stack_flags) != VmmMapResult::Success) {
+            pmm_free_page(user_stack_phys);
+            parent_process->destroy();
+            state = THREAD_DEAD;
+            return;
+        }
         
         context->rsp = 0x00007FFFF0000000;
     } else {
@@ -104,7 +147,10 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
 }
 
 Thread::~Thread() {
-    // In a real OS we would delete the kernel stack here
+    if (kernel_stack_base) {
+        delete[] reinterpret_cast<uint8_t*>(kernel_stack_base);
+        kernel_stack_base = 0;
+    }
 }
 
 void scheduler_init() {
@@ -118,6 +164,14 @@ void scheduler_init() {
 }
 
 void scheduler_add_thread(Thread* thread) {
+    if (!thread || thread->state == THREAD_DEAD || !thread->context || !thread->kernel_stack_base) return;
+    if (thread->parent_process && thread->parent_process->is_user) {
+        if (vmm_retain_address_space(thread->parent_process->page_table_phys) != VmmAddressSpaceResult::Success) {
+            thread->state = THREAD_DEAD;
+            return;
+        }
+        thread->address_space_retained = true;
+    }
     if (!s_current_thread) {
         s_current_thread = thread;
     } else {
@@ -138,7 +192,17 @@ static inline void arch_restore_fpu(void* buffer) {
 }
 
 extern "C" Context* scheduler_switch(Context* current_context) {
+    if (!smp_is_bootstrap_processor()) return current_context;
     if (!s_current_thread) return current_context;
+
+    // Retired thread stacks belong to an earlier context. We are now running
+    // on a different stack, so their stacks and objects can be reclaimed.
+    while (s_retired_threads) {
+        Thread* retired = s_retired_threads;
+        s_retired_threads = retired->next;
+        retired->next = retired;
+        delete retired;
+    }
     
     // 1. Save state of the current thread
     s_current_thread->context = current_context;
@@ -188,10 +252,59 @@ extern "C" Context* scheduler_switch(Context* current_context) {
     g_kernel_rsp = s_current_thread->kernel_stack;
 
     // Switch Page Table (PML4) if parent_process changed!
-    if (s_current_thread->parent_process) {
-        vmm_switch_address_space(s_current_thread->parent_process->page_table_phys);
+    if (s_current_thread->parent_process &&
+        vmm_switch_address_space(s_current_thread->parent_process->page_table_phys) !=
+            VmmAddressSpaceResult::Success) {
+        // A retained user root should not become invalid. If it does, fail
+        // closed by returning to the permanent kernel/idle address space.
+        s_current_thread->state = THREAD_DEAD;
+        s_current_thread = s_idle_thread;
+        s_current_thread->state = THREAD_RUNNING;
+        arch_restore_fpu(s_current_thread->fpu_state);
+        vmm_switch_address_space(vmm_get_kernel_pml4());
+        g_kernel_rsp = s_current_thread->kernel_stack;
     }
     
+    // Unlink dead non-current threads. Their stacks cannot be freed here: the
+    // interrupt/context-switch code may still be unwinding on the old stack.
+    // Queue them for reclamation at the start of a later scheduler invocation.
+    if (s_current_thread) {
+        Thread* predecessor = s_current_thread;
+        Thread* cursor = predecessor->next;
+        while (cursor != s_current_thread) {
+            if (cursor->state != THREAD_DEAD || cursor == s_idle_thread) {
+                predecessor = cursor;
+                cursor = cursor->next;
+                continue;
+            }
+
+            Thread* dead = cursor;
+            Process* process = dead->parent_process;
+            predecessor->next = dead->next;
+            cursor = predecessor->next;
+            if (s_last_normal_thread == dead) s_last_normal_thread = s_current_thread;
+            if (dead->address_space_retained && process) {
+                vmm_release_address_space(process->page_table_phys);
+                dead->address_space_retained = false;
+            }
+            dead->parent_process = nullptr;
+            dead->next = s_retired_threads;
+            s_retired_threads = dead;
+
+            bool process_still_scheduled = false;
+            Thread* scan = s_current_thread;
+            do {
+                if (scan->parent_process == process) {
+                    process_still_scheduled = true;
+                    break;
+                }
+                scan = scan->next;
+            } while (scan && scan != s_current_thread);
+            if (process && !process_still_scheduled && process->is_user && process->destroy())
+                delete process;
+        }
+    }
+
     // Update TSS (Task State Segment) RSP0 so Ring 3 interrupts land on the new Kernel Stack
     if (g_gdt) {
         g_gdt->set_kernel_stack(s_current_thread->kernel_stack);

@@ -17,10 +17,11 @@
 #
 
 
-CXX = ../cross/bin/x86_64-elf-g++
-CC = ../cross/bin/x86_64-elf-gcc
-AS = ../cross/bin/x86_64-elf-as
-LD = ../cross/bin/x86_64-elf-ld
+CROSS_COMPILE ?= x86_64-elf-
+CXX = $(CROSS_COMPILE)g++
+CC = $(CROSS_COMPILE)gcc
+AS = $(CROSS_COMPILE)as
+LD = $(CROSS_COMPILE)ld
 PACKAGER = ../tools/drk-packager/drk-packager
 
 CFLAGS = -O2 -fno-pie -fno-pic -fno-stack-protector -mno-red-zone -nostdlib -ffreestanding -I./libc/include

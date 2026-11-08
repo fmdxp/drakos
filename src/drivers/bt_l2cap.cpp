@@ -309,10 +309,12 @@ void BluetoothL2CAP::handle_info_rsp(uint8_t ident, const uint8_t* data) {
 void BluetoothL2CAP::send_acl(uint16_t cid, const uint8_t* data, uint16_t length) {
     uint16_t handle = m_hci->get_acl_handle();
     if (handle == 0) return;
+    if (length > (2 * PAGE_SIZE) - 8) return;
     
     uint16_t flags = 0x0; // First automatically flushable packet (PB = 00b)
     
     uintptr_t buf_phys = pmm_alloc(1);
+    if (!buf_phys) return;
     uint8_t* buf = reinterpret_cast<uint8_t*>(buf_phys + pmm_hhdm_offset());
     
     // ACL Header
@@ -333,7 +335,7 @@ void BluetoothL2CAP::send_acl(uint16_t cid, const uint8_t* data, uint16_t length
     // Send via Bulk OUT
     m_hci->get_xhci()->submit_bulk_out(m_hci->get_slot_id(), reinterpret_cast<void*>(buf_phys), acl_len + 4);
     
-    pmm_free_page(buf_phys);
+    pmm_free(buf_phys, 1);
 }
 
 void BluetoothL2CAP::send_data(uint16_t cid, const uint8_t* data, size_t length) {

@@ -19,13 +19,20 @@
 
 ## Compilers ##
 
-CXX = cross/bin/x86_64-elf-g++
-LD  = cross/bin/x86_64-elf-ld
+CROSS_COMPILE ?= x86_64-elf-
+CXX = $(CROSS_COMPILE)g++
+LD  = $(CROSS_COMPILE)ld
+LIMINE ?= limine
+LIMINE_CONF ?= limine.conf
 
 
 ## Dirs ##
 
-LIMINE_DIR 	= ./limine-binary
+LIMINE_DIR ?= $(shell data_dir=`$(LIMINE) --print-datadir 2>/dev/null`; \
+	if test -n "$$data_dir" && test -f "$$data_dir/BOOTX64.EFI"; then echo "$$data_dir"; \
+	else limine_path=`command -v $(LIMINE)`; prefix=`dirname "$$(dirname "$$limine_path")"`; \
+		candidate="$$prefix/share/limine"; \
+		if test -f "$$candidate/BOOTX64.EFI"; then echo "$$candidate"; fi; fi)
 
 KERNEL 		= iso_root/kernel.elf
 ISO			= drakos.iso
@@ -78,7 +85,7 @@ LDFLAGS	=	-T linker.ld -nostdlib
 
 ## Targets ##
 
-.PHONY: all clean run debug images
+.PHONY: all clean run debug images test-initcalls test-font test-pmm test-vmm test-heap qemu-test-address-space
 
 all: $(ISO)
 
@@ -100,10 +107,10 @@ $(KERNEL): $(OBJS) $(FONT_OBJ) linker.ld
 	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJ) -o $(KERNEL)
 
 
-$(ISO): $(KERNEL) limine.conf
+$(ISO): $(KERNEL) $(LIMINE_CONF)
 	@mkdir -p iso_root/EFI/BOOT
 	cp $(LIMINE_DIR)/BOOTX64.EFI iso_root/EFI/BOOT/
-	cp limine.conf iso_root/
+	cp $(LIMINE_CONF) iso_root/limine.conf
 	cp $(LIMINE_DIR)/limine-uefi-cd.bin iso_root/
 	xorriso -as mkisofs -R -r -J -V "DRAKOS" \
 		--efi-boot limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
@@ -180,6 +187,17 @@ run: $(ISO) seed_disk
         -device nvme,serial=NVME1234,drive=nvme0
 
 
+qemu-test-address-space: $(ISO)
+	@set -eu; test_root=$$(mktemp -d /tmp/drakos-as-test.XXXXXX); \
+	trap 'rm -rf "$$test_root"' EXIT; \
+	cp -a iso_root "$$test_root/root"; \
+	sed 's/cmdline: drakos.mode=normal/cmdline: drakos.mode=verbose drakos.test=address-space/' limine.conf > "$$test_root/root/limine.conf"; \
+	xorriso -as mkisofs -R -r -J -V DRAKOS-AS-TEST --efi-boot limine-uefi-cd.bin -efi-boot-part --efi-boot-image "$$test_root/root" -o "$$test_root/test.iso" >/dev/null 2>&1; \
+	truncate -s 32M "$$test_root/disk.img"; \
+	set +e; timeout 20s qemu-system-x86_64 -cpu max -smp 4 -bios /usr/share/ovmf/OVMF.fd -cdrom "$$test_root/test.iso" -m 256M -display none -serial "file:$$test_root/serial.log" -monitor none -no-reboot -device ahci,id=ahci -drive "file=$$test_root/disk.img,format=raw,if=none,id=disk" -device ide-hd,bus=ahci.0,drive=disk; qemu_status=$$?; set -e; \
+	if [ "$$qemu_status" -ne 124 ]; then cat "$$test_root/serial.log"; echo "QEMU exited unexpectedly: $$qemu_status"; exit 1; fi; \
+	cat "$$test_root/serial.log"; grep -q 'address-space test: PASS' "$$test_root/serial.log"
+
 debug: $(ISO) images seed_disk
 	qemu-system-x86_64 \
 		-cpu max \
@@ -197,3 +215,39 @@ debug: $(ISO) images seed_disk
 		-drive id=nvme0,file=$(NVME_IMG),if=none,format=raw \
 		-device nvme,serial=NVME1234,drive=nvme0 \
 		-s -S
+
+HOST_CXX ?= g++
+build/initcall_registry_tests: tests/initcall_registry_test.cpp src/kernel/initcall_registry.cpp include/kernel/initcall_registry.hpp
+	@mkdir -p $(BUILD)
+	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -Iinclude $< src/kernel/initcall_registry.cpp -o $@
+
+test-initcalls: build/initcall_registry_tests
+	./build/initcall_registry_tests
+
+build/font_unicode_tests: tests/font_unicode_test.cpp include/font.hpp src/fonts/Lat2-Terminus16.psf
+	@mkdir -p $(BUILD)
+	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -Iinclude $< -o $@
+
+test-font: build/font_unicode_tests
+	./build/font_unicode_tests src/fonts/Lat2-Terminus16.psf
+
+build/pmm_tests: tests/pmm_test.cpp src/memory/pmm.cpp include/memory/pmm.hpp include/kernel/limine_requests.hpp
+	@mkdir -p $(BUILD)
+	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -DDRAKOS_HOST_TEST -Iinclude -Iinclude/memory -Iinclude/kernel $< src/memory/pmm.cpp -o $@
+
+test-pmm: build/pmm_tests
+	./build/pmm_tests
+
+build/vmm_tests: tests/vmm_test.cpp src/memory/pmm.cpp src/memory/vmm.cpp include/memory/pmm.hpp include/memory/vmm.hpp include/kernel/limine_requests.hpp
+	@mkdir -p $(BUILD)
+	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -DDRAKOS_HOST_TEST -Iinclude -Iinclude/memory -Iinclude/kernel $< src/memory/pmm.cpp src/memory/vmm.cpp -o $@
+
+test-vmm: build/vmm_tests
+	./build/vmm_tests
+
+build/heap_tests: tests/heap_test.cpp src/memory/heap.cpp include/memory/heap.hpp include/memory/pmm.hpp include/memory/vmm.hpp
+	@mkdir -p $(BUILD)
+	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -DDRAKOS_HOST_TEST -Iinclude -Iinclude/memory $< src/memory/heap.cpp -o $@
+
+test-heap: build/heap_tests
+	./build/heap_tests

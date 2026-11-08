@@ -180,8 +180,12 @@ bool NVMeController::init() {
     uintptr_t phys_base = (bar0_low & 0xFFFFFFF0) | ((uint64_t)bar0_high << 32);
     
     m_bar0 = phys_base + pmm_hhdm_offset();
-    vmm_map(m_bar0 & ~0xFFFULL, phys_base & ~0xFFFULL, VMM_MMIO);
-    vmm_map((m_bar0 + 0x1000) & ~0xFFFULL, (phys_base + 0x1000) & ~0xFFFULL, VMM_MMIO);
+    if (vmm_map_mmio_page(m_bar0 & ~0xFFFULL, phys_base & ~0xFFFULL) != VmmMapResult::Success)
+        return false;
+    if (vmm_map_mmio_page((m_bar0 + 0x1000) & ~0xFFFULL,
+                          (phys_base + 0x1000) & ~0xFFFULL) != VmmMapResult::Success) {
+        return false;
+    }
 
     // Enable Bus Master + Memory Space via raw PCI I/O (g_pci may not be ready yet)
     uint32_t cmd = pci_read_raw(m_pci.bus, m_pci.device, m_pci.function, 0x04);

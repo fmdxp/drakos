@@ -44,7 +44,11 @@ static char hex_digit(uint8_t v) {
 
 bool USBManager::start() {
     // TEMPORARY: Disable USB Manager to test multithreading
-    return true;
+    return false;
+}
+
+const char* USBManager::failure_reason() const {
+    return "USB manager is intentionally disabled";
 }
 
 const char* USBManager::get_name() const {

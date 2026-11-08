@@ -40,6 +40,9 @@
 
 #include "syscalls.hpp"
 #include "cpu.hpp"
+#include "boot_diagnostics.hpp"
+#include "address_space_runtime_test.hpp"
+#include "kernel/smp.hpp"
 
 #include "elf.hpp"
 #include "drk.hpp"
@@ -66,13 +69,35 @@ static void make_threads_and_processes()
 }
 
 
+static bool command_line_has_test(const char* command_line) {
+    constexpr char requested[] = "drakos.test=address-space";
+    if (!command_line) return false;
+    for (const char* at = command_line; *at; ++at) {
+        size_t i = 0;
+        while (requested[i] && at[i] == requested[i]) ++i;
+        if (!requested[i]) return true;
+    }
+    return false;
+}
+
 extern "C" [[noreturn]] void kernel_main(void)
 {
     // 0. Call C++ global constructors BEFORE anything else!    (i actually forgot in older commits...)
     cpp_call_constructors();
 
-    // 1. Initialize base hardware and VGA, so we can see output
-    system_init_modules();
+    const char* command_line = nullptr;
+    if (g_cmdline_request.response && g_cmdline_request.response->cmdline) {
+        command_line = g_cmdline_request.response->cmdline;
+    }
+    boot_diagnostics_init(command_line);
+    // NX must be enabled before the VMM publishes any NX leaf entries.
+    (void)enable_nx();
+
+    // Initialize ordered kernel components. A mandatory failure prevents normal operation.
+    InitcallSummary initcalls = system_init_modules();
+    if (initcalls.mandatory_failures != 0) {
+        panic("Required kernel initialization failed");
+    }
     
     // 2. Enable MSR Syscalls (yeee)
     enable_syscalls();
@@ -82,18 +107,15 @@ extern "C" [[noreturn]] void kernel_main(void)
     
     // 4. Initialize Scheduler and create test threads
     scheduler_init();
+    if (!smp_initialize()) panic("SMP initialization failed");
+    if (command_line_has_test(command_line)) run_address_space_runtime_test();
     
     // 5. Make all the kernel threads and processes
     make_threads_and_processes();
 
 
-    // If framebuffer or VGA are not available, halt
-    if (g_framebuffer_request.response == NULL || g_framebuffer_request.response->framebuffer_count < 1) panic("Broken framebuffer");    // This will be printed on the serial instead.
-    if (!g_vga) panic("VGA did not init");
-
-
     // Kernel is now initialized!
-    g_vga->write("Welcome to drakos!\n");
+    if (g_vga) g_vga->write("Welcome to drakos!\n");
     // test_vfs();
 
     

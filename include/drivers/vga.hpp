@@ -31,6 +31,8 @@ public:
 
     void write_char(char c);        // Single char printing
     void write(const char* str);    // String printing
+    void write_char_raw(char c);
+    void write_raw(const char* str);
 
     void scroll();
     void draw_cursor();
@@ -55,6 +57,7 @@ private:
 
     // Helper method to draw a single pixel
     void put_pixel(uint32_t x, uint32_t y, uint32_t color);
+    void write_codepoint_raw_locked(uint32_t codepoint);
 };
 
 // Expose the global VGA instance

@@ -18,15 +18,20 @@
 
 
 #include "serial.hpp"
+#include "kernel/boot_diagnostics.hpp"
 
 static volatile bool serial_lock = false;
 
-static inline void lock_serial() {
+static inline uint64_t lock_serial() {
+    uint64_t flags;
+    asm volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
     while (__atomic_test_and_set(&serial_lock, __ATOMIC_ACQUIRE)) {}
+    return flags;
 }
 
-static inline void unlock_serial() {
+static inline void unlock_serial(uint64_t flags) {
     __atomic_clear(&serial_lock, __ATOMIC_RELEASE);
+    if (flags & 0x200) asm volatile("sti" ::: "memory");
 }
 
 
@@ -93,17 +98,42 @@ const char* Serial::get_name() const {
 }
 
 void Serial::write_char(char c) {
-    // Wait until the transmit buffer is ready
-    lock_serial();
+    char text[2] = {c, '\0'};
+    boot_diagnostics_capture(text);
+    if (!boot_diagnostics_visible()) return;
+    write_char_raw(c);
+}
+
+void Serial::write_char_raw(char c) {
+    uint64_t flags = lock_serial();
+    if (c == '\n') {
+        while (!is_transmit_ready());
+        outb(COM1_PORT, '\r');
+    }
     while (!is_transmit_ready());
-    outb(COM1_PORT, (uint8_t)c);
-    unlock_serial();
+    outb(COM1_PORT, static_cast<uint8_t>(c));
+    unlock_serial(flags);
 }
 
 void Serial::write(const char* str) {
-    for (const char* p = str; *p != '\0'; p++) {
-        write_char(*p);
+    boot_diagnostics_capture(str);
+    if (boot_diagnostics_visible()) write_raw(str);
+}
+
+void Serial::write_raw(const char* str) {
+    if (!str) return;
+    uint64_t flags = lock_serial();
+    bool previous_was_cr = false;
+    for (const char* p = str; *p != '\0'; ++p) {
+        if (*p == '\n' && !previous_was_cr) {
+            while (!is_transmit_ready());
+            outb(COM1_PORT, '\r');
+        }
+        while (!is_transmit_ready());
+        outb(COM1_PORT, static_cast<uint8_t>(*p));
+        previous_was_cr = (*p == '\r');
     }
+    unlock_serial(flags);
 }
 
 // Register as a Driver Module (level 3)

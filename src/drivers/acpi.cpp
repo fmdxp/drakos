@@ -113,5 +113,6 @@ const char* ACPI::get_name() const {
     return "ACPI Subsystem";
 }
 
-// We register this as a driver level component because it relies on PMM mapping
-REGISTER_MODULE(g_acpi, ACPI, 3_drv);
+// Parse firmware tables after memory setup and before dependent device drivers.
+static const char* const kAcpiDependencies[] = {"g_pmm"};
+REGISTER_MODULE_OPTIONAL(g_acpi, ACPI, 3_acpi, kAcpiDependencies);

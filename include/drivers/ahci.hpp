@@ -152,11 +152,13 @@ public:
     bool start() override;
     void stop() override;
     const char* get_name() const override { return "AHCI"; }
+    const char* failure_reason() const override { return m_failure_reason; }
 
 private:
+    const char* m_failure_reason = "AHCI initialization failed";
     HBAMemory* m_hba = nullptr;
     void check_port(HBAPort* port, int port_no);
-    void port_rebase(HBAPort* port, int port_no);
+    bool port_rebase(HBAPort* port, int port_no);
 };
 
 } // namespace AHCI

@@ -50,8 +50,10 @@ public:
     bool start() override;
     void stop() override;
     const char* get_name() const override;
+    const char* failure_reason() const override { return m_failure_reason; }
 
 private:
+    const char* m_failure_reason = "xHCI initialization failed";
     uintptr_t m_mmio_base = 0;
     
     // Core capabilities

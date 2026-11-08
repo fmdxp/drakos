@@ -42,28 +42,92 @@
 // VMM PUBLIC API
 // -------------------------------------------------------------------
 
+enum class VmmMapResult : uint8_t {
+    Success,
+    InvalidVirtualAddress,
+    InvalidPhysicalAddress,
+    MappingExists,
+    PageTableOutOfMemory,
+    InvalidAddressSpace,
+    UnsupportedMapping,
+    FrameAlreadyOwned,
+};
+
+struct VmmMappingInfo {
+    uintptr_t physical_page;
+    uint64_t flags;
+    size_t page_size;
+    enum class Ownership : uint8_t { Borrowed, Owned, Mmio } ownership;
+};
+
+enum class VmmUnmapResult : uint8_t {
+    Success,
+    NotMapped,
+    InvalidVirtualAddress,
+    InvalidAddressSpace,
+    PageTableOutOfMemory,
+    UnsupportedMapping,
+};
+
+enum class VmmAddressSpaceResult : uint8_t {
+    Success,
+    InvalidAddressSpace,
+    KernelAddressSpace,
+    ActiveAddressSpace,
+    AddressSpaceInUse,
+    OutOfMemory,
+};
+
 // Map a virtual address to a physical address with the given flags in the CURRENT address space.
 // Creates intermediate page table levels as needed (uses PMM internally).
-void vmm_map(uintptr_t virt, uintptr_t phys, uint64_t flags);
+VmmMapResult vmm_map(uintptr_t virt, uintptr_t phys, uint64_t flags);
+
+// Map an MMIO page in the active kernel address space. If the HHDM already
+// maps the same physical page, this explicitly applies MMIO cache attributes;
+// a different existing physical mapping is never replaced.
+VmmMapResult vmm_map_mmio_page(uintptr_t virt, uintptr_t phys);
+
+// Query the active address space, including existing 1 GiB and 2 MiB leaves.
+bool vmm_query_mapping(uintptr_t virt, VmmMappingInfo* info);
 
 // Map a virtual address to a physical address in a SPECIFIC address space (PML4).
-void vmm_map_page(uintptr_t pml4_phys, uintptr_t virt, uintptr_t phys, uint64_t flags);
+VmmMapResult vmm_map_page(uintptr_t pml4_phys, uintptr_t virt, uintptr_t phys, uint64_t flags);
+
+// Explicitly map an exclusively owned PMM order-0 frame. Existing vmm_map*
+// APIs continue to create borrowed mappings and never transfer frame ownership.
+// A frame already tagged owned in any address space is rejected.
+VmmMapResult vmm_map_owned_page(uintptr_t pml4_phys, uintptr_t virt,
+                                uintptr_t phys, uint64_t flags);
 
 // Create a new address space (returns physical address of new PML4)
 uintptr_t vmm_create_address_space();
 
 // Switch to a new address space
-void vmm_switch_address_space(uintptr_t pml4_phys);
+VmmAddressSpaceResult vmm_switch_address_space(uintptr_t pml4_phys);
+
+// Address spaces created by VMM are reference-counted while threads can run
+// them. Destruction succeeds only for an inactive root with no references.
+VmmAddressSpaceResult vmm_retain_address_space(uintptr_t pml4_phys);
+VmmAddressSpaceResult vmm_release_address_space(uintptr_t pml4_phys);
+VmmAddressSpaceResult vmm_destroy_address_space(uintptr_t pml4_phys);
 
 // Return the kernel master PML4 physical address
 uintptr_t vmm_get_kernel_pml4();
 
 // Remove the mapping for a virtual address and flush the TLB entry.
-void vmm_unmap(uintptr_t virt);
+VmmUnmapResult vmm_unmap(uintptr_t virt);
+VmmUnmapResult vmm_unmap_page(uintptr_t pml4_phys, uintptr_t virt);
 
 // Walk the current page tables and return the physical address mapped
 // at 'virt'. Returns 0 if not mapped.
 uintptr_t vmm_get_phys(uintptr_t virt);
+
+#ifdef DRAKOS_HOST_TEST
+void vmm_test_set_cr3(uintptr_t value);
+uintptr_t vmm_test_last_invalidation();
+void vmm_test_fail_page_table_allocation_after(int successful_allocations);
+void vmm_test_fail_registry_allocation_after(int successful_allocations);
+#endif
 
 // -------------------------------------------------------------------
 // VMM MODULE

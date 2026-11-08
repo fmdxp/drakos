@@ -18,6 +18,7 @@
 
 
 #include "vga.hpp"
+#include "kernel/boot_diagnostics.hpp"
 #include "font.hpp"
 #include "serial.hpp"
 #include "limine_requests.hpp"
@@ -100,24 +101,37 @@ void VGA::put_pixel(uint32_t x, uint32_t y, uint32_t color) {
 }
 
 void VGA::write_char(char c) {
-    if (!m_font) return;
+    char text[2] = {c, '\0'};
+    boot_diagnostics_capture(text);
+    if (boot_diagnostics_visible()) write_char_raw(c);
+}
 
+void VGA::write_char_raw(char c) {
     uint64_t flags = lock_fb();
+    write_codepoint_raw_locked(static_cast<uint8_t>(c));
+    unlock_fb(flags);
+}
+
+void VGA::write_codepoint_raw_locked(uint32_t codepoint) {
+    if (!m_font) return;
 
     const uint32_t w = m_font->get_width();
     const uint32_t h = m_font->get_height();
 
-    // Handle newline
-    if (c == '\n') {
+    // Handle CR/LF so both Unix and serial-style line endings start at column 0.
+    if (codepoint == '\r') {
+        m_cursor_x = 0;
+        return;
+    }
+    if (codepoint == '\n') {
         m_cursor_x = 0;
         m_cursor_y += h;
         if (m_cursor_y + h > m_height) scroll();
-        unlock_fb(flags);
         return;
     }
 
     // Handle backspace
-    if (c == '\b') {
+    if (codepoint == '\b') {
         if (m_cursor_x >= w) {
             m_cursor_x -= w;
 
@@ -126,13 +140,11 @@ void VGA::write_char(char c) {
                 for (uint32_t x = 0; x < m_font->get_width(); x++) 
                     put_pixel(m_cursor_x + x, m_cursor_y + y, m_bg_color);  
         }
-
-        unlock_fb(flags);
         return;
     }
 
-    // Get the glyph data for this character
-    const uint8_t* glyph = m_font->get_glyph(c);
+    // Decode UTF-8 to Unicode codepoints before looking up PSF1 Unicode glyphs.
+    const uint8_t* glyph = m_font->get_glyph_codepoint(codepoint);
 
     // Check if we need to wrap to the next line
     if (m_cursor_x + w >= m_width) {
@@ -156,14 +168,68 @@ void VGA::write_char(char c) {
 
     // Advance cursor
     m_cursor_x += w;
-    unlock_fb(flags);
 }
 
 void VGA::write(const char* str) {
-    while (*str) {
-        if (g_serial) g_serial->write_char(*str);
-        write_char(*str++);
+    boot_diagnostics_capture(str);
+    if (boot_diagnostics_visible()) write_raw(str);
+}
+
+void VGA::write_raw(const char* str) {
+    if (!str) return;
+
+    // Keep framebuffer and serial copies in the same message order.
+    uint64_t flags = lock_fb();
+    if (g_serial) g_serial->write_raw(str);
+
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(str);
+    while (*p) {
+        uint32_t codepoint;
+        uint8_t first = *p++;
+        if (first < 0x80) {
+            codepoint = first;
+        } else {
+            uint32_t minimum;
+            uint32_t continuation_count;
+            if ((first & 0xE0) == 0xC0) {
+                codepoint = first & 0x1F;
+                minimum = 0x80;
+                continuation_count = 1;
+            } else if ((first & 0xF0) == 0xE0) {
+                codepoint = first & 0x0F;
+                minimum = 0x800;
+                continuation_count = 2;
+            } else if ((first & 0xF8) == 0xF0) {
+                codepoint = first & 0x07;
+                minimum = 0x10000;
+                continuation_count = 3;
+            } else {
+                codepoint = 0xFFFD;
+                continuation_count = 0;
+                minimum = 0;
+            }
+
+            bool valid = continuation_count != 0;
+            for (uint32_t i = 0; valid && i < continuation_count; ++i) {
+                if (p[i] == 0 || (p[i] & 0xC0) != 0x80) {
+                    valid = false;
+                    break;
+                }
+                codepoint = (codepoint << 6) | (p[i] & 0x3F);
+            }
+            if (valid) {
+                p += continuation_count;
+                if (codepoint < minimum || codepoint > 0x10FFFF ||
+                    (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+                    codepoint = 0xFFFD;
+                }
+            } else {
+                codepoint = 0xFFFD;
+            }
+        }
+        write_codepoint_raw_locked(codepoint);
     }
+    unlock_fb(flags);
 }
 
 void VGA::scroll() {
@@ -213,4 +279,5 @@ void VGA::clear_screen() {
 }
 
 // Register VGA driver as module (level 3_drv)
-REGISTER_MODULE(g_vga, VGA, 3_drv);
+static const char* const kVgaDependencies[] = {"g_vmm"};
+REGISTER_MODULE_OPTIONAL(g_vga, VGA, 3_drv, kVgaDependencies);

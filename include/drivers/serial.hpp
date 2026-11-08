@@ -36,6 +36,8 @@ public:
 
     // Write a null-terminated string to the serial port
     void write(const char* str);
+    void write_raw(const char* str);
+    void write_char_raw(char c);
 
 private:
     // Read a byte from the given I/O port

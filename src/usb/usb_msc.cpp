@@ -28,8 +28,8 @@ namespace USB {
 
 static uintptr_t alloc_dma_page() {
     uintptr_t phys = pmm_alloc_page();
+    if (!phys) return 0;
     uintptr_t virt = phys + pmm_hhdm_offset();
-    vmm_map(virt & ~0xFFFULL, phys, VMM_MMIO);
     for (int i = 0; i < 4096; i++) ((uint8_t*)virt)[i] = 0;
     return phys;
 }
@@ -49,10 +49,12 @@ bool USBMassStorage::init() {
     m_cbw_phys  = alloc_dma_page();
     m_csw_phys  = alloc_dma_page();
     m_data_phys = alloc_dma_page();
+    if (!m_cbw_phys || !m_csw_phys || !m_data_phys) return false;
 
     // Reset the interface with Bulk-Only Mass Storage Reset
     // bmRequestType=0x21 (Class,Interface,OUT), bRequest=0xFF, wValue=0, wIndex=0, wLength=0
     uintptr_t dummy = alloc_dma_page();
+    if (!dummy) return false;
     m_xhci->do_control_transfer(m_slot_id, 0x21, 0xFF, 0, 0, 0,
                                  reinterpret_cast<void*>(dummy));
 

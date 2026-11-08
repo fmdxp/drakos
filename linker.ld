@@ -46,44 +46,11 @@ SECTIONS
         KEEP(*(.dtors))
         __fini_array_end = .;
 
-        /* --- MODULE INITCALLS --- */
+        /* Immutable initcall descriptors, ordered by their phase suffix. */
         . = ALIGN(8);
-        __initcalls_1_core_start = .;
-        KEEP(*(.initcalls.1_core))
-        __initcalls_1_core_end = .;
-
-        /* --- MEMORY SUBSYSTEM (ordered: PMM → VMM → Heap) --- */
-        . = ALIGN(8);
-        __initcalls_2_mem_a_start = .;
-        KEEP(*(.initcalls.2_mem_a))
-        __initcalls_2_mem_a_end = .;
-
-        . = ALIGN(8);
-        __initcalls_2_mem_b_start = .;
-        KEEP(*(.initcalls.2_mem_b))
-        __initcalls_2_mem_b_end = .;
-
-        . = ALIGN(8);
-        __initcalls_2_mem_c_start = .;
-        KEEP(*(.initcalls.2_mem_c))
-        __initcalls_2_mem_c_end = .;
-
-        . = ALIGN(8);
-        __initcalls_3_drv_start = .;
-        KEEP(*(.initcalls.3_drv))
-        __initcalls_3_drv_end = .;
-
-        /* --- DEVICE DRIVERS (Keyboard, Mouse, etc) --- */
-        . = ALIGN(8);
-        __initcalls_4_dev_start = .;
-        KEEP(*(.initcalls.4_dev))
-        __initcalls_4_dev_end = .;
-
-        /* --- USB SUBSYSTEM (xHCI) --- */
-        . = ALIGN(8);
-        __initcalls_5_usb_start = .;
-        KEEP(*(.initcalls.5_usb))
-        __initcalls_5_usb_end = .;
+        __initcalls_start = .;
+        KEEP(*(SORT_BY_NAME(.initcalls.*)))
+        __initcalls_end = .;
     }
 
     .data : ALIGN(4K) {

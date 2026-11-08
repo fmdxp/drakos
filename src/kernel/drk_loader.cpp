@@ -5,6 +5,7 @@
 #include "panic.hpp"
 #include "pmm.hpp"
 #include "vmm.hpp"
+#include "cpu.hpp"
 #include "vga.hpp"
 
 using namespace DRK;
@@ -114,9 +115,21 @@ bool DrkLoader::loadExecutable() {
 
     // Create process (Thread constructor will create the address space)
     Process* proc = new Process();
+    if (!proc) return false;
 
     // Create Thread FIRST — this sets up proc->page_table_phys and the user stack
     Thread* user_thread = new Thread(proc, (void(*)())ehdr.e_entry, true, "DrkApp");
+    if (!user_thread || user_thread->state == THREAD_DEAD) {
+        delete user_thread;
+        if (proc->destroy()) delete proc;
+        return false;
+    }
+    auto cleanup_unqueued_thread = [&]() {
+        user_thread->state = THREAD_DEAD;
+        bool address_space_destroyed = proc->destroy();
+        delete user_thread;
+        if (address_space_destroyed) delete proc;
+    };
 
     // Now we have proc->page_table_phys — map ELF segments into it
     for (int i = 0; i < ehdr.e_phnum; i++) {
@@ -125,6 +138,10 @@ bool DrkLoader::loadExecutable() {
         vfs_read(fd, &phdr, sizeof(Elf64_Phdr));
 
         if (phdr.p_type == PT_LOAD) {
+            if (!(phdr.p_flags & PF_R) || ((phdr.p_flags & PF_W) && (phdr.p_flags & PF_X))) {
+                cleanup_unqueued_thread();
+                return false;
+            }
             uint64_t virt_base        = phdr.p_vaddr & ~(PAGE_SIZE - 1);
             uint64_t offset_in_page   = phdr.p_vaddr & (PAGE_SIZE - 1);
             uint64_t remaining_file   = phdr.p_filesz;
@@ -133,13 +150,21 @@ bool DrkLoader::loadExecutable() {
 
             uint64_t flags = VMM_PRESENT | VMM_USER;
             if (phdr.p_flags & PF_W) flags |= VMM_WRITE;
-            // Note: executable pages have NX bit CLEAR (i.e., no VMM_NX)
+            if (!(phdr.p_flags & PF_X) && nx_enabled()) flags |= VMM_NX;
 
             for (uint64_t p = 0; p < mem_pages; p++) {
                 uintptr_t phys  = pmm_alloc_page();
                 uint64_t  vaddr = virt_base + (p * PAGE_SIZE);
+                if (!phys) {
+                    cleanup_unqueued_thread();
+                    return false;
+                }
 
-                vmm_map_page(proc->page_table_phys, vaddr, phys, flags);
+                if (vmm_map_owned_page(proc->page_table_phys, vaddr, phys, flags) != VmmMapResult::Success) {
+                    pmm_free_page(phys);
+                    cleanup_unqueued_thread();
+                    return false;
+                }
 
                 // Zero the page first (.bss gets clean memory)
                 uint8_t* virt_ptr = (uint8_t*)(phys + pmm_hhdm_offset());
@@ -162,6 +187,10 @@ bool DrkLoader::loadExecutable() {
     }
 
     scheduler_add_thread(user_thread);
+    if (user_thread->state == THREAD_DEAD) {
+        cleanup_unqueued_thread();
+        return false;
+    }
     return true;
 }
 

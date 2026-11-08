@@ -40,7 +40,8 @@ bool IOAPIC::start() {
 
     // Access via HHDM
     m_ioapic_virt = g_acpi->get_ioapic_phys() + pmm_hhdm_offset();
-    vmm_map(m_ioapic_virt & ~0xFFFULL, g_acpi->get_ioapic_phys() & ~0xFFFULL, VMM_MMIO);
+    if (vmm_map_mmio_page(m_ioapic_virt & ~0xFFFULL,
+                          g_acpi->get_ioapic_phys() & ~0xFFFULL) != VmmMapResult::Success) return false;
 
     // Disable the legacy 8259 PIC
     disable_legacy_pic();
@@ -109,4 +110,5 @@ void IOAPIC::set_entry(uint8_t irq, uint8_t vector) {
 }
 
 // Register as a driver
-REGISTER_MODULE(g_ioapic, IOAPIC, 3_drv);
+static const char* const kIoapicDependencies[] = {"g_acpi", "g_vmm"};
+REGISTER_MODULE_OPTIONAL(g_ioapic, IOAPIC, 3_drv, kIoapicDependencies);

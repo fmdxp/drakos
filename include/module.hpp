@@ -21,6 +21,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "kernel/initcall_registry.hpp"
 
 // PLACEMENT NEW OPERATOR
 // Allows calling C++ constructors on statically allocated
@@ -52,35 +53,60 @@ public:
 
     // For debugging/logging
     virtual const char* get_name() const = 0;
+
+    // Return a static explanation when start() fails. stop() must undo partial setup.
+    virtual const char* failure_reason() const { return "start() returned false"; }
 };
 
-// INITCALL REGISTRY
-typedef bool (*initcall_t)();
+#define DRK_PHASE_1_core InitcallPhase::Core
+#define DRK_PHASE_2_mem_a InitcallPhase::MemoryA
+#define DRK_PHASE_2_mem_b InitcallPhase::MemoryB
+#define DRK_PHASE_2_mem_c InitcallPhase::MemoryC
+#define DRK_PHASE_3_acpi InitcallPhase::Firmware
+#define DRK_PHASE_3_drv InitcallPhase::Driver
+#define DRK_PHASE_4_dev InitcallPhase::Device
+#define DRK_PHASE_5_usb InitcallPhase::Bus
+#define DRK_PHASE_EXPAND(level) DRK_PHASE_##level
+#define DRK_PHASE(level) DRK_PHASE_EXPAND(level)
 
-#define REGISTER_MODULE(obj_name, class_type, level) \
-    /* 1. Allocate a static byte array for the object */ \
-    static uint8_t __storage_##obj_name[sizeof(class_type)]; \
+#define REGISTER_MODULE_CONFIG(obj_name, class_type, level, required, deps, dep_count) \
+    alignas(class_type) static uint8_t __storage_##obj_name[sizeof(class_type)]; \
     \
-    /* 2. Create the global pointer */ \
     class_type* obj_name = nullptr; \
     \
-    /* 3. The init function that uses placement new */ \
-    static bool __init_##obj_name() { \
+    static InitcallResult __init_##obj_name() { \
         obj_name = new (__storage_##obj_name) class_type(); \
         if (!obj_name->start()) { \
+            const char* error = obj_name->failure_reason(); \
             obj_name->stop(); \
-            return false; \
+            obj_name = nullptr; \
+            return {false, error}; \
         } \
-        return true; \
+        return {true, nullptr}; \
     } \
     \
-    /* 4. Put the function pointer in the specific linker section */ \
-    static initcall_t __initcall_##obj_name \
-    __attribute__((section(".initcalls." #level), used)) = __init_##obj_name;
+    static const InitcallDescriptor __initcall_##obj_name \
+    __attribute__((section(".initcalls." #level), used, aligned(8))) = { \
+        #obj_name, DRK_PHASE(level), required, deps, dep_count, __init_##obj_name \
+    };
+
+#define REGISTER_MODULE(obj_name, class_type, level) \
+    REGISTER_MODULE_CONFIG(obj_name, class_type, level, InitcallRequirement::Optional, nullptr, 0)
+
+#define REGISTER_MODULE_OPTIONAL(obj_name, class_type, level, deps_array) \
+    REGISTER_MODULE_CONFIG(obj_name, class_type, level, InitcallRequirement::Optional, \
+        deps_array, sizeof(deps_array) / sizeof((deps_array)[0]))
+
+#define REGISTER_MODULE_REQUIRED(obj_name, class_type, level, deps_array) \
+    REGISTER_MODULE_CONFIG(obj_name, class_type, level, InitcallRequirement::Mandatory, \
+        deps_array, sizeof(deps_array) / sizeof((deps_array)[0]))
+
+#define REGISTER_MODULE_REQUIRED_NO_DEPS(obj_name, class_type, level) \
+    REGISTER_MODULE_CONFIG(obj_name, class_type, level, InitcallRequirement::Mandatory, nullptr, 0)
 
 // ---------------------------------------------------------
 // SYSTEM INITIALIZATION
 // ---------------------------------------------------------
 // Call this function once during OS boot to execute all initcalls
-void system_init_modules();
+InitcallSummary system_init_modules();
 

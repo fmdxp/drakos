@@ -96,6 +96,11 @@ void GDT::set_kernel_stack(uintptr_t stack) {
     tss.rsp0 = stack;
 }
 
+void GDT::load_cpu_descriptors() {
+    asm volatile("lgdt %0" : : "m"(pointer));
+    reload_segments();
+}
+
 void GDT::set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags) {
     entries[index].base_low = (base & 0xFFFF);
     entries[index].base_middle = (base >> 16) & 0xFF;
@@ -120,4 +125,4 @@ void GDT::set_tss(int index, uintptr_t base, uint32_t limit) {
 }
 
 // Register as Core Module
-REGISTER_MODULE(g_gdt, GDT, 1_core);
+REGISTER_MODULE_REQUIRED_NO_DEPS(g_gdt, GDT, 1_core);

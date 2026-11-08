@@ -79,6 +79,7 @@ public:
     bool start() override;
     void stop() override;
     const char* get_name() const override;
+    const char* failure_reason() const override;
     bool has_pending_tasks();
 
     // Called by XHCI ISR: records pending device, returns IMMEDIATELY (no heavy work)

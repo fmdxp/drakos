@@ -58,8 +58,9 @@ static FreeBlock* s_free_lists[MAX_ORDER + 1];
 // PAGE STATE TRACKING
 //
 // For each physical page, we store:
-//   0xFF      = page is allocated (or not the start of a free block)
+//   0xFF      = interior page or allocated page without head metadata
 //   0 - 10    = this page is the START of a free block of that order
+//   0x80-0x8A = allocated block head, with the order encoded in the value
 //
 // This lets us detect the buddy in O(1):
 //   - Compute buddy address: buddy = addr XOR (PAGE_SIZE << order)
@@ -68,7 +69,43 @@ static FreeBlock* s_free_lists[MAX_ORDER + 1];
 // -------------------------------------------------------------------
 
 #define PAGE_ALLOCATED 0xFF
+#define PAGE_ALLOCATED_HEAD 0x80
 static uint8_t* s_page_order = nullptr;  // Array of s_total_pages entries
+static volatile bool s_pmm_lock = false;
+
+static inline uint64_t lock_pmm() {
+#ifdef DRAKOS_HOST_TEST
+    return 0;
+#else
+    uint64_t flags;
+    asm volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    while (__atomic_test_and_set(&s_pmm_lock, __ATOMIC_ACQUIRE)) {
+        asm volatile("pause");
+    }
+    return flags;
+#endif
+}
+
+static inline void unlock_pmm(uint64_t flags) {
+#ifndef DRAKOS_HOST_TEST
+    __atomic_clear(&s_pmm_lock, __ATOMIC_RELEASE);
+    if (flags & 0x200) asm volatile("sti" ::: "memory");
+#else
+    (void)flags;
+#endif
+}
+
+static bool map_entry_end(const limine_memmap_entry* entry, uint64_t& end) {
+    if (entry->length > UINT64_MAX - entry->base) return false;
+    end = entry->base + entry->length;
+    return true;
+}
+
+static bool align_up_page(uint64_t value, uint64_t& aligned) {
+    if (value > UINT64_MAX - (PAGE_SIZE - 1)) return false;
+    aligned = (value + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    return true;
+}
 
 // -------------------------------------------------------------------
 // INTERNAL HELPERS
@@ -119,6 +156,12 @@ static bool free_list_remove(uint32_t order, uintptr_t phys) {
 // -------------------------------------------------------------------
 
 uintptr_t pmm_alloc(uint32_t order) {
+    uint64_t flags = lock_pmm();
+    if (!s_page_order || order > MAX_ORDER) {
+        unlock_pmm(flags);
+        return 0;
+    }
+
     uint32_t found_order = order;
     
     // Step 1: Find the first order that has at least one free block
@@ -131,6 +174,7 @@ uintptr_t pmm_alloc(uint32_t order) {
 
     // Step 2: If we exceeded MAX_ORDER, we are out of memory
     if (found_order > MAX_ORDER) {
+        unlock_pmm(flags);
         return 0; // OOM (Out Of Memory)
     }
 
@@ -138,7 +182,7 @@ uintptr_t pmm_alloc(uint32_t order) {
     uintptr_t phys = free_list_pop(found_order);
 
     // Step 4: Mark the block as allocated in our state array
-    s_page_order[phys >> PAGE_SHIFT] = PAGE_ALLOCATED;
+    s_page_order[phys >> PAGE_SHIFT] = PAGE_ALLOCATED_HEAD + order;
 
     // Step 5: Split the block if we found one larger than requested
     while (found_order > order) {
@@ -155,10 +199,27 @@ uintptr_t pmm_alloc(uint32_t order) {
     }
 
     // Step 6: Return the physical address of our allocated block
+    unlock_pmm(flags);
     return phys;
 }
 
 void pmm_free(uintptr_t phys_addr, uint32_t order) {
+    uint64_t flags = lock_pmm();
+    if (!s_page_order || phys_addr == 0 || order > MAX_ORDER) {
+        unlock_pmm(flags);
+        return;
+    }
+
+    uintptr_t block_size = PAGE_SIZE << order;
+    uint64_t page = phys_addr >> PAGE_SHIFT;
+    uint64_t page_count = 1ULL << order;
+    if ((phys_addr & (block_size - 1)) != 0 || page >= s_total_pages ||
+        page_count > s_total_pages - page ||
+        s_page_order[page] != PAGE_ALLOCATED_HEAD + order) {
+        unlock_pmm(flags);
+        return;
+    }
+
     uintptr_t phys = phys_addr;
     
     // Step 1: Attempt to merge with buddy until we reach MAX_ORDER
@@ -179,7 +240,7 @@ void pmm_free(uintptr_t phys_addr, uint32_t order) {
         
         // The buddy is available! Let's merge.
         // Remove buddy from its current free list
-        free_list_remove(order, buddy);
+        if (!free_list_remove(order, buddy)) break;
         
         // Mark the buddy as allocated (it's no longer a standalone free block)
         s_page_order[buddy_page] = PAGE_ALLOCATED;
@@ -197,11 +258,26 @@ void pmm_free(uintptr_t phys_addr, uint32_t order) {
     free_list_push(order, phys);
     
     // Step 3: Mark this block as free in our state array
+    const uint64_t merged_pages = 1ULL << order;
+    for (uint64_t i = 0; i < merged_pages; ++i)
+        s_page_order[(phys >> PAGE_SHIFT) + i] = PAGE_ALLOCATED;
     s_page_order[phys >> PAGE_SHIFT] = order;
+    unlock_pmm(flags);
 }
 
 uint64_t pmm_hhdm_offset() {
     return s_hhdm_offset;
+}
+
+bool pmm_is_allocated_page(uintptr_t phys_addr) {
+    uint64_t flags = lock_pmm();
+    bool allocated = false;
+    if (s_page_order && phys_addr != 0 && (phys_addr & (PAGE_SIZE - 1)) == 0) {
+        uint64_t page = phys_addr >> PAGE_SHIFT;
+        allocated = page < s_total_pages && s_page_order[page] == PAGE_ALLOCATED_HEAD;
+    }
+    unlock_pmm(flags);
+    return allocated;
 }
 
 // -------------------------------------------------------------------
@@ -209,64 +285,79 @@ uint64_t pmm_hhdm_offset() {
 // -------------------------------------------------------------------
 
 bool PMM::start() {
+    s_page_order = nullptr;
+    s_total_pages = 0;
+    s_hhdm_offset = 0;
+    for (uint32_t order = 0; order <= MAX_ORDER; ++order) s_free_lists[order] = nullptr;
+
     // 1. Read HHDM offset
     if (!g_hhdm_request.response) return false;
     s_hhdm_offset = g_hhdm_request.response->offset;
 
     // 2. Read physical memory map
     if (!g_memmap_request.response) return false;
+    if (g_memmap_request.response->entry_count != 0 && !g_memmap_request.response->entries) return false;
 
-    // 3. Find the highest physical address to compute s_total_pages
+    // 3. Find the highest usable address to size page metadata.
     uint64_t highest_addr = 0;
     for (uint64_t i = 0; i < g_memmap_request.response->entry_count; i++) {
         struct limine_memmap_entry* entry = g_memmap_request.response->entries[i];
-        if (entry->type == LIMINE_MEMMAP_USABLE) {
-            uint64_t top = entry->base + entry->length;
+        if (!entry) return false;
+        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length != 0) {
+            uint64_t top;
+            if (!map_entry_end(entry, top)) return false;
             if (top > highest_addr) highest_addr = top;
         }
     }
-    s_total_pages = highest_addr / PAGE_SIZE;
+    s_total_pages = highest_addr / PAGE_SIZE + (highest_addr % PAGE_SIZE != 0);
 
     // If there is no usable RAM, the kernel cannot function
     if (s_total_pages == 0) return false;
 
     // 4. The s_page_order array takes 1 byte per page. Find space for it in RAM.
-    uint64_t state_array_size = s_total_pages; 
+    if (s_total_pages > UINT64_MAX - (PAGE_SIZE - 1)) return false;
+    uint64_t state_array_size = s_total_pages;
     // MUST align to PAGE_SIZE to keep buddy allocator blocks aligned!
     state_array_size = (state_array_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     
+    bool metadata_reserved = false;
     for (uint64_t i = 0; i < g_memmap_request.response->entry_count; i++) {
         struct limine_memmap_entry* entry = g_memmap_request.response->entries[i];
-        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= state_array_size) {
-            // Found it! Place the array at the start of this block
-            s_page_order = reinterpret_cast<uint8_t*>(entry->base + s_hhdm_offset);
-            
-            // "Steal" these bytes from RAM so the kernel doesn't give them to others
-            entry->base += state_array_size;
-            entry->length -= state_array_size;
+        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length != 0) {
+            uint64_t end;
+            uint64_t start;
+            if (!map_entry_end(entry, end) ||
+                !align_up_page(entry->base < PAGE_SIZE ? PAGE_SIZE : entry->base, start) ||
+                start > end || end - start < state_array_size) continue;
+
+            // Keep page zero reserved; zero is also the allocation failure value.
+            s_page_order = reinterpret_cast<uint8_t*>(start + s_hhdm_offset);
+            entry->base = start + state_array_size;
+            entry->length = end - entry->base;
+            metadata_reserved = true;
             break;
         }
     }
 
-    if (!s_page_order) return false; // Not enough RAM for the state array!
+    if (!metadata_reserved) return false; // Not enough RAM for the state array!
 
     // 5. Initialize everything as allocated (0xFF)
     for (uint64_t i = 0; i < s_total_pages; i++) {
         s_page_order[i] = PAGE_ALLOCATED;
     }
 
-    // 6. Clear free lists
-    for (int i = 0; i <= MAX_ORDER; i++) {
-        s_free_lists[i] = nullptr;
-    }
-
     // 7. Fill the Buddy System with the remaining RAM
     for (uint64_t i = 0; i < g_memmap_request.response->entry_count; i++) {
         struct limine_memmap_entry* entry = g_memmap_request.response->entries[i];
-        if (entry->type != LIMINE_MEMMAP_USABLE) continue;
+        if (entry->type != LIMINE_MEMMAP_USABLE || entry->length == 0) continue;
 
-        uint64_t addr = entry->base;
-        uint64_t len = entry->length;
+        uint64_t end;
+        uint64_t addr;
+        if (!map_entry_end(entry, end) ||
+            !align_up_page(entry->base < PAGE_SIZE ? PAGE_SIZE : entry->base, addr)) return false;
+        end &= ~(PAGE_SIZE - 1);
+        if (addr >= end) continue;
+        uint64_t len = end - addr;
 
         // Split this space into the largest possible blocks
         while (len >= PAGE_SIZE) {
@@ -305,4 +396,4 @@ const char* PMM::get_name() const {
 }
 
 // Register as the FIRST memory module
-REGISTER_MODULE(g_pmm, PMM, 2_mem_a);
+REGISTER_MODULE_REQUIRED_NO_DEPS(g_pmm, PMM, 2_mem_a);

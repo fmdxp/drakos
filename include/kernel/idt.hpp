@@ -53,6 +53,7 @@ public:
     bool start() override;
     void stop() override;
     const char* get_name() const override;
+    void load_cpu_descriptor();
 
 private:
     void set_entry(int index, uint64_t isr, uint8_t flags);
@@ -61,3 +62,5 @@ private:
     IDTEntry entries[256];
     IDTPointer pointer;
 };
+
+extern IDT* g_idt;

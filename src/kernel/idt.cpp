@@ -21,9 +21,11 @@
 #include "vga.hpp"
 #include "panic.hpp"
 #include "thread.hpp" // for Context
+#include "kernel/smp.hpp"
+#include "kernel/address_space_runtime_test.hpp"
 
 extern Thread* scheduler_get_current_thread();
-extern void scheduler_block_current_thread();
+extern void scheduler_yield();
 extern void lapic_eoi();
 
 // External assembly stubs
@@ -63,6 +65,7 @@ extern void lapic_eoi();
 extern "C" void isr_32();
 extern "C" void isr_33();
 extern "C" void isr_40();
+extern "C" void isr_241();
 
 // Global system tick counter
 volatile uint64_t g_system_ticks = 0;
@@ -74,8 +77,11 @@ extern "C" void isr_handler(Context* ctx) {
         bool from_user = (ctx->cs & 3) == 3;
         
         if (from_user) {
+            uintptr_t fault_address = 0;
+            if (ctx->int_no == 14) asm volatile("mov %%cr2, %0" : "=r"(fault_address));
+            bool expected_test_fault = address_space_runtime_record_fault(ctx->int_no, fault_address);
             // Don't crash the kernel! Kill the offending thread.
-            if (g_vga) {
+            if (g_vga && !expected_test_fault) {
                 g_vga->write("\n[Ring3 Fault #");
                 char buf[16];
                 int n = ctx->int_no;
@@ -92,7 +98,7 @@ extern "C" void isr_handler(Context* ctx) {
             if (t) t->state = THREAD_DEAD;
             // EOI so APIC doesn't lock up, then yield to next thread
             lapic_eoi();
-            scheduler_block_current_thread();
+            scheduler_yield();
             return; // unreachable, but safe
         }
         
@@ -124,6 +130,9 @@ extern "C" void isr_handler(Context* ctx) {
     } else if (ctx->int_no == 40) {
         // xHCI (IRQ 8 mapped)
         xhci_handle_interrupt();
+        lapic_eoi();
+    } else if (ctx->int_no == 241) {
+        smp_handle_ipi();
         lapic_eoi();
     } else {
         lapic_eoi();
@@ -164,6 +173,7 @@ bool IDT::start() {
     set_entry(32, (uint64_t)isr_32, 0x8E);
     set_entry(33, (uint64_t)isr_33, 0x8E);
     set_entry(40, (uint64_t)isr_40, 0x8E);
+    set_entry(241, (uint64_t)isr_241, 0x8E);
 
     // TODO: Cleanly register all 256 from an array instead of manual externs
 
@@ -181,6 +191,10 @@ const char* IDT::get_name() const {
     return "Interrupt Descriptor Table (IDT)";
 }
 
+void IDT::load_cpu_descriptor() {
+    asm volatile("lidt %0" : : "m"(pointer));
+}
+
 void IDT::set_entry(int vector, uint64_t handler, uint8_t flags) {
     entries[vector].isr_low = handler & 0xFFFF;
     entries[vector].kernel_cs = 0x08; // Kernel Code Segment
@@ -191,4 +205,5 @@ void IDT::set_entry(int vector, uint64_t handler, uint8_t flags) {
     entries[vector].reserved = 0;
 }
 
-REGISTER_MODULE(g_idt, IDT, 1_core);
+static const char* const kIdtDependencies[] = {"g_gdt"};
+REGISTER_MODULE_REQUIRED(g_idt, IDT, 1_core, kIdtDependencies);

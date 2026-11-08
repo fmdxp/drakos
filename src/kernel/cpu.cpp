@@ -22,6 +22,29 @@
 #include <stdint.h>
 #include <cpuid.h>
 
+static bool s_nx_enabled = false;
+
+bool nx_enabled() { return s_nx_enabled; }
+
+bool enable_nx() {
+    uint32_t eax, ebx, ecx, edx;
+    uint32_t max_leaf = __get_cpuid_max(0x80000000, nullptr);
+    if (max_leaf < 0x80000001 || !__get_cpuid(0x80000001, &eax, &ebx, &ecx, &edx) ||
+        !(edx & (1u << 20))) {
+        s_nx_enabled = false;
+        return false;
+    }
+    uint32_t low, high;
+    asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(0xC0000080));
+    uint64_t efer = (static_cast<uint64_t>(high) << 32) | low;
+    efer |= 1ULL << 11; // EFER.NXE
+    low = static_cast<uint32_t>(efer);
+    high = static_cast<uint32_t>(efer >> 32);
+    asm volatile("wrmsr" :: "c"(0xC0000080), "a"(low), "d"(high) : "memory");
+    s_nx_enabled = true;
+    return true;
+}
+
 // Enable FPU/SSE/AVX support dynamically based on CPUID.
 // NOTE: We deliberately limit XCR0 to x87 + SSE + AVX (bits 0,1,2).
 // AVX-512 (bits 5,6,7) and AMX (bits 17,18) would push the XSAVE area
