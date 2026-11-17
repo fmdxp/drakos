@@ -15,6 +15,33 @@ static volatile uint64_t s_user_fault_mapping_flags = 0;
 static volatile bool s_user_fault_mapping_owned = false;
 static uintptr_t s_expected_fault_address = 0;
 static uint64_t s_expected_fault_vector = 0;
+static uint64_t s_smp_kernel_counter = 0;
+
+static void smp_kernel_counter_thread() {
+    for (;;) __atomic_add_fetch(&s_smp_kernel_counter, 1, __ATOMIC_RELAXED);
+}
+
+static void install_smp_user_counter_program(uintptr_t frame) {
+    constexpr uintptr_t data_va = 0x00401000;
+    const uint8_t program[] = {
+        0x48, 0xBB, 0x00, 0x10, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xB8, 0x27, 0x00, 0x00, 0x00, 0x0F, 0x05,
+        0xF0, 0x48, 0xFF, 0x03, 0xEB, 0xF3
+    };
+    auto* code = reinterpret_cast<volatile uint8_t*>(frame + pmm_hhdm_offset());
+    for (size_t i = 0; i < sizeof(program); ++i) code[i] = program[i];
+}
+
+static bool wait_address_space_destroyed(uintptr_t root) {
+    for (size_t attempt = 0; attempt < 128; ++attempt) {
+        VmmAddressSpaceResult result = vmm_retain_address_space(root);
+        if (result == VmmAddressSpaceResult::InvalidAddressSpace) return true;
+        if (result == VmmAddressSpaceResult::Success)
+            (void)vmm_release_address_space(root);
+        scheduler_yield();
+    }
+    return false;
+}
 
 void address_space_runtime_expect_fault(uintptr_t fault_address, uint64_t vector) {
     s_expected_fault_address = fault_address;
@@ -118,12 +145,12 @@ static bool run_user_fault_case(const char* name, uintptr_t target, bool write_t
     for (size_t i = 0; i < 100 && !address_space_runtime_fault_seen(); ++i)
         scheduler_yield();
     if (!address_space_runtime_fault_seen()) {
-        thread->state = THREAD_DEAD;
+        scheduler_terminate_thread(thread);
         scheduler_yield();
     }
     bool fault_ok = address_space_runtime_fault_seen() && address_space_runtime_fault_matches();
     s_expect_user_fault = false;
-    bool torn_down = vmm_retain_address_space(root) == VmmAddressSpaceResult::InvalidAddressSpace;
+    bool torn_down = wait_address_space_destroyed(root);
     bool owned_frames_released = !pmm_is_allocated_page(code_frame) &&
         (!extra_frame || !pmm_is_allocated_page(extra_frame));
     bool passed = fault_ok && torn_down && owned_frames_released;
@@ -201,7 +228,7 @@ static bool run_user_syscall_pointer_test() {
     for (size_t i = 0; i < 100 && !address_space_runtime_fault_seen(); ++i)
         scheduler_yield();
     if (!address_space_runtime_fault_seen()) {
-        thread->state = THREAD_DEAD;
+        scheduler_terminate_thread(thread);
         scheduler_yield();
     }
     bool syscall_rejected_pointer =
@@ -209,7 +236,7 @@ static bool run_user_syscall_pointer_test() {
     bool expected_end = address_space_runtime_fault_seen() &&
                         address_space_runtime_fault_matches();
     s_expect_user_fault = false;
-    bool torn_down = vmm_retain_address_space(root) == VmmAddressSpaceResult::InvalidAddressSpace;
+    bool torn_down = wait_address_space_destroyed(root);
     bool borrowed_frame_preserved = pmm_is_allocated_page(result_frame);
     pmm_free_page(result_frame); // borrowed user mapping must not own this frame
     bool passed = syscall_rejected_pointer && expected_end && torn_down && borrowed_frame_preserved;
@@ -280,7 +307,7 @@ static bool run_user_mmap_test(bool verify_munmap) {
     for (size_t i = 0; i < 100 && !address_space_runtime_fault_seen(); ++i)
         scheduler_yield();
     if (!address_space_runtime_fault_seen()) {
-        thread->state = THREAD_DEAD;
+        scheduler_terminate_thread(thread);
         scheduler_yield();
     }
     bool fault_ok = address_space_runtime_fault_seen() && address_space_runtime_fault_matches();
@@ -288,7 +315,7 @@ static bool run_user_mmap_test(bool verify_munmap) {
     bool mapping_owned = false;
     bool mapping_found = address_space_runtime_fault_mapping(&leaf_flags, &mapping_owned);
     s_expect_user_fault = false;
-    bool torn_down = vmm_retain_address_space(root) == VmmAddressSpaceResult::InvalidAddressSpace;
+    bool torn_down = wait_address_space_destroyed(root);
     bool permissions_ok = verify_munmap
         ? !mapping_found
         : (mapping_found && mapping_owned && (leaf_flags & (VMM_PRESENT | VMM_USER | VMM_NX)) ==
@@ -437,8 +464,8 @@ bool run_address_space_runtime_test() {
     scheduler_add_thread(second);
     bool refs_block_destroy = vmm_destroy_address_space(process->page_table_phys) ==
                               VmmAddressSpaceResult::AddressSpaceInUse;
-    first->state = THREAD_DEAD;
-    second->state = THREAD_DEAD;
+    scheduler_terminate_thread(first);
+    scheduler_terminate_thread(second);
     scheduler_yield();
     bool dead_threads_released = vmm_retain_address_space(process_root) ==
                                  VmmAddressSpaceResult::InvalidAddressSpace;
@@ -530,5 +557,306 @@ bool run_address_space_runtime_test() {
                                      : "address-space registry stress: FAIL\n");
 
     boot_diagnostics_write(ok ? "address-space test: PASS\n" : "address-space test: FAIL\n");
+    return ok;
+}
+
+bool run_smp_kernel_scheduler_runtime_test() {
+    uint32_t online_cpus = smp_online_cpu_count();
+    bool all_schedulers_enabled = online_cpus >= 2 &&
+        scheduler_enabled_processor_count() == online_cpus;
+    if (!all_schedulers_enabled) {
+        boot_diagnostics_write("SMP scheduler CPU initialization: FAIL\n");
+        return false;
+    }
+    boot_diagnostics_write("SMP scheduler CPU initialization: PASS\n");
+    Process* process = new Process();
+    Thread* first = process ? new Thread(process, smp_kernel_counter_thread, false,
+                                         "smp-kernel-a") : nullptr;
+    Thread* second = process ? new Thread(process, smp_kernel_counter_thread, false,
+                                          "smp-kernel-b") : nullptr;
+    bool ok = process && first && second && first->state != THREAD_DEAD &&
+              second->state != THREAD_DEAD;
+    if (!ok) {
+        delete first;
+        delete second;
+        delete process;
+        boot_diagnostics_write("SMP concurrent kernel threads: FAIL (setup)\n");
+        return false;
+    }
+    s_smp_kernel_counter = 0;
+    scheduler_add_thread(first);
+    scheduler_add_thread(second);
+    bool enrolled = first->scheduler_enrolled && second->scheduler_enrolled;
+    uint32_t lo, hi;
+    uint64_t start, now;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    start = (static_cast<uint64_t>(hi) << 32) | lo;
+    bool concurrent = false;
+    bool migrated = false;
+    while (enrolled) {
+        concurrent = scheduler_count_running_process_cpus(process) >= 2;
+        migrated = scheduler_thread_migration_count(first) +
+                   scheduler_thread_migration_count(second) > 0;
+        if (concurrent && migrated &&
+            __atomic_load_n(&s_smp_kernel_counter, __ATOMIC_RELAXED) != 0)
+            break;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        now = (static_cast<uint64_t>(hi) << 32) | lo;
+        if (now - start > 5000000000ULL) break;
+        asm volatile("pause");
+    }
+    migrated |= scheduler_thread_migration_count(first) +
+                scheduler_thread_migration_count(second) > 0;
+    if (first->scheduler_enrolled) scheduler_terminate_thread(first);
+    if (second->scheduler_enrolled) scheduler_terminate_thread(second);
+    if (!first->scheduler_enrolled) delete first;
+    if (!second->scheduler_enrolled) delete second;
+    bool reclaimed = false;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    start = (static_cast<uint64_t>(hi) << 32) | lo;
+    while (scheduler_count_process_threads(process) != 0) {
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        now = (static_cast<uint64_t>(hi) << 32) | lo;
+        if (now - start > 5000000000ULL) break;
+        asm volatile("pause");
+    }
+    reclaimed = scheduler_count_process_threads(process) == 0;
+    delete process;
+    ok = enrolled && concurrent && migrated && reclaimed;
+    boot_diagnostics_write(ok ? "SMP concurrent kernel threads: PASS\n"
+                              : "SMP concurrent kernel threads: FAIL\n");
+    boot_diagnostics_write(migrated ? "SMP thread migration: PASS\n"
+                                    : "SMP thread migration: FAIL\n");
+    return ok;
+}
+
+bool run_smp_user_scheduler_runtime_test() {
+    if (smp_online_cpu_count() < 2) {
+        boot_diagnostics_write("SMP user scheduling: FAIL (fewer than 2 CPUs)\n");
+        return false;
+    }
+
+    constexpr uintptr_t code_va = 0x00400000;
+    constexpr uintptr_t data_va = 0x00401000;
+    Process* process = new Process();
+    if (!process) return false;
+    process->page_table_phys = vmm_create_address_space();
+    process->is_user = process->page_table_phys != 0;
+    uintptr_t root = process->page_table_phys;
+    uintptr_t code_frame = pmm_alloc_page();
+    uintptr_t data_frame = pmm_alloc_page();
+    bool ok = process->is_user && code_frame && data_frame;
+    if (ok) {
+        // User code performs getpid through SYSCALL and atomically increments
+        // a shared counter forever. Timer interrupts must preempt it on each CPU.
+        auto* code = reinterpret_cast<volatile uint8_t*>(code_frame + pmm_hhdm_offset());
+        uint8_t program[] = {
+            0x48, 0xBB, // movabs rbx, data_va
+            0x00, 0x10, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xB8, 0x27, 0x00, 0x00, 0x00, // mov eax, SYS_getpid
+            0x0F, 0x05,                   // syscall
+            0xF0, 0x48, 0xFF, 0x03,       // lock inc qword [rbx]
+            0xEB, 0xF3                    // jmp to SYS_getpid
+        };
+        for (size_t i = 0; i < sizeof(program); ++i) code[i] = program[i];
+        auto* counter = reinterpret_cast<volatile uint64_t*>(data_frame + pmm_hhdm_offset());
+        *counter = 0;
+        bool code_mapped = vmm_map_owned_page(root, code_va, code_frame,
+                                 VMM_PRESENT | VMM_USER) == VmmMapResult::Success;
+        bool data_mapped = code_mapped && vmm_map_owned_page(root, data_va, data_frame,
+                                 VMM_PRESENT | VMM_WRITE | VMM_USER |
+                                     (nx_enabled() ? VMM_NX : 0)) == VmmMapResult::Success;
+        ok = code_mapped && data_mapped;
+        if (!code_mapped && code_frame && pmm_is_allocated_page(code_frame))
+            pmm_free_page(code_frame);
+        if (!data_mapped && data_frame && pmm_is_allocated_page(data_frame))
+            pmm_free_page(data_frame);
+    }
+
+    auto* first = ok ? new Thread(process, reinterpret_cast<void(*)()>(code_va), true,
+                                 "smp-user-a") : nullptr;
+    auto* second = ok ? new Thread(process, reinterpret_cast<void(*)()>(code_va), true,
+                                  "smp-user-b") : nullptr;
+    ok &= first && second && first->state != THREAD_DEAD && second->state != THREAD_DEAD;
+    if (!ok) {
+        delete first;
+        delete second;
+        if (process->is_user) (void)process->destroy();
+        delete process;
+        boot_diagnostics_write("SMP user scheduling: FAIL (setup)\n");
+        return false;
+    }
+    uint64_t ap_syscalls_before = smp_ap_syscall_count();
+    if (ok) {
+        scheduler_add_thread(first);
+        scheduler_add_thread(second);
+        ok &= first->scheduler_enrolled && second->scheduler_enrolled;
+    }
+    if (!ok) {
+        if (first->scheduler_enrolled) scheduler_terminate_thread(first);
+        if (second->scheduler_enrolled) scheduler_terminate_thread(second);
+        if (!first->scheduler_enrolled) delete first;
+        if (!second->scheduler_enrolled) delete second;
+        if (!first->scheduler_enrolled && !second->scheduler_enrolled) {
+            if (process->is_user) (void)process->destroy();
+            delete process;
+        }
+        boot_diagnostics_write("SMP user scheduling: FAIL (enqueue)\n");
+        return false;
+    }
+
+    uint64_t tsc_start, tsc_end;
+    uint32_t lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    tsc_start = (static_cast<uint64_t>(hi) << 32) | lo;
+    bool concurrent = false;
+    bool syscall_progress = false;
+    while (ok) {
+        concurrent = scheduler_count_running_process_cpus(process) >= 2;
+        auto* counter = reinterpret_cast<volatile uint64_t*>(data_frame + pmm_hhdm_offset());
+        syscall_progress = *counter > 0 && smp_ap_syscall_count() > ap_syscalls_before;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        tsc_end = (static_cast<uint64_t>(hi) << 32) | lo;
+        if (concurrent && syscall_progress) break;
+        if (tsc_end - tsc_start > 5000000000ULL) break;
+        asm volatile("pause");
+    }
+
+    if (first && first->scheduler_enrolled) scheduler_terminate_thread(first);
+    if (second && second->scheduler_enrolled) scheduler_terminate_thread(second);
+    if (!first || !first->scheduler_enrolled) delete first;
+    if (!second || !second->scheduler_enrolled) delete second;
+
+    bool reclaimed = false;
+    if (process->is_user) {
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        tsc_start = (static_cast<uint64_t>(hi) << 32) | lo;
+        for (;;) {
+            VmmAddressSpaceResult retain = vmm_retain_address_space(root);
+            if (retain == VmmAddressSpaceResult::InvalidAddressSpace) {
+                reclaimed = true;
+                break;
+            }
+            if (retain == VmmAddressSpaceResult::Success)
+                (void)vmm_release_address_space(root);
+            asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+            tsc_end = (static_cast<uint64_t>(hi) << 32) | lo;
+            if (tsc_end - tsc_start > 5000000000ULL) break;
+            asm volatile("pause");
+        }
+    }
+    ok &= concurrent && syscall_progress && reclaimed;
+    boot_diagnostics_write(concurrent ? "SMP shared address-space execution: PASS\n"
+                                      : "SMP shared address-space execution: FAIL\n");
+    boot_diagnostics_write(syscall_progress ? "SMP AP syscall progress: PASS\n"
+                                            : "SMP AP syscall progress: FAIL\n");
+    boot_diagnostics_write(reclaimed ? "SMP concurrent process teardown: PASS\n"
+                                     : "SMP concurrent process teardown: FAIL\n");
+    return ok;
+}
+
+bool run_smp_independent_user_runtime_test() {
+    constexpr uintptr_t code_va = 0x00400000;
+    constexpr uintptr_t data_va = 0x00401000;
+    Process* first_process = new Process();
+    Process* second_process = new Process();
+    if (!first_process || !second_process) {
+        delete first_process;
+        delete second_process;
+        return false;
+    }
+    first_process->page_table_phys = vmm_create_address_space();
+    first_process->is_user = first_process->page_table_phys != 0;
+    second_process->page_table_phys = vmm_create_address_space();
+    second_process->is_user = second_process->page_table_phys != 0;
+    uintptr_t first_root = first_process->page_table_phys;
+    uintptr_t second_root = second_process->page_table_phys;
+    uintptr_t first_code = pmm_alloc_page();
+    uintptr_t first_data = pmm_alloc_page();
+    uintptr_t second_code = pmm_alloc_page();
+    uintptr_t second_data = pmm_alloc_page();
+    bool setup = first_process->is_user && second_process->is_user && first_code &&
+                 first_data && second_code && second_data;
+    if (setup) {
+        install_smp_user_counter_program(first_code);
+        install_smp_user_counter_program(second_code);
+        *reinterpret_cast<volatile uint64_t*>(first_data + pmm_hhdm_offset()) = 0;
+        *reinterpret_cast<volatile uint64_t*>(second_data + pmm_hhdm_offset()) = 0;
+        uint64_t data_flags = VMM_PRESENT | VMM_WRITE | VMM_USER |
+                              (nx_enabled() ? VMM_NX : 0);
+        setup = vmm_map_owned_page(first_root, code_va, first_code,
+                                   VMM_PRESENT | VMM_USER) == VmmMapResult::Success &&
+                vmm_map_owned_page(first_root, data_va, first_data,
+                                   data_flags) == VmmMapResult::Success &&
+                vmm_map_owned_page(second_root, code_va, second_code,
+                                   VMM_PRESENT | VMM_USER) == VmmMapResult::Success &&
+                vmm_map_owned_page(second_root, data_va, second_data,
+                                   data_flags) == VmmMapResult::Success;
+    }
+    Thread* first = setup ? new Thread(first_process,
+        reinterpret_cast<void(*)()>(code_va), true, "smp-process-a") : nullptr;
+    Thread* second = setup ? new Thread(second_process,
+        reinterpret_cast<void(*)()>(code_va), true, "smp-process-b") : nullptr;
+    setup &= first && second && first->state != THREAD_DEAD && second->state != THREAD_DEAD;
+    if (!setup) {
+        delete first;
+        delete second;
+        if (first_process->is_user) (void)first_process->destroy();
+        if (second_process->is_user) (void)second_process->destroy();
+        if (first_code && pmm_is_allocated_page(first_code)) pmm_free_page(first_code);
+        if (first_data && pmm_is_allocated_page(first_data)) pmm_free_page(first_data);
+        if (second_code && pmm_is_allocated_page(second_code)) pmm_free_page(second_code);
+        if (second_data && pmm_is_allocated_page(second_data)) pmm_free_page(second_data);
+        delete first_process;
+        delete second_process;
+        boot_diagnostics_write("SMP independent address spaces: FAIL (setup)\n");
+        return false;
+    }
+
+    scheduler_add_thread(first);
+    scheduler_add_thread(second);
+    bool enrolled = first->scheduler_enrolled && second->scheduler_enrolled;
+    uint32_t lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t start = (static_cast<uint64_t>(hi) << 32) | lo;
+    bool concurrent = false;
+    bool progress = false;
+    while (enrolled) {
+        concurrent = scheduler_count_running_process_cpus(first_process) >= 1 &&
+                     scheduler_count_running_process_cpus(second_process) >= 1;
+        progress = *reinterpret_cast<volatile uint64_t*>(first_data + pmm_hhdm_offset()) > 0 &&
+                   *reinterpret_cast<volatile uint64_t*>(second_data + pmm_hhdm_offset()) > 0;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        uint64_t now = (static_cast<uint64_t>(hi) << 32) | lo;
+        if (concurrent && progress) break;
+        if (now - start > 5000000000ULL) break;
+        asm volatile("pause");
+    }
+    if (first->scheduler_enrolled) scheduler_terminate_thread(first);
+    if (second->scheduler_enrolled) scheduler_terminate_thread(second);
+    bool reclaimed_first = false, reclaimed_second = false;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    start = (static_cast<uint64_t>(hi) << 32) | lo;
+    while (!reclaimed_first || !reclaimed_second) {
+        if (!reclaimed_first) {
+            VmmAddressSpaceResult r = vmm_retain_address_space(first_root);
+            reclaimed_first = r == VmmAddressSpaceResult::InvalidAddressSpace;
+            if (r == VmmAddressSpaceResult::Success)
+                (void)vmm_release_address_space(first_root);
+        }
+        if (!reclaimed_second) {
+            VmmAddressSpaceResult r = vmm_retain_address_space(second_root);
+            reclaimed_second = r == VmmAddressSpaceResult::InvalidAddressSpace;
+            if (r == VmmAddressSpaceResult::Success)
+                (void)vmm_release_address_space(second_root);
+        }
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        uint64_t now = (static_cast<uint64_t>(hi) << 32) | lo;
+        if (now - start > 5000000000ULL) break;
+        asm volatile("pause");
+    }
+    bool ok = enrolled && concurrent && progress && reclaimed_first && reclaimed_second;
+    boot_diagnostics_write(ok ? "SMP independent address spaces: PASS\n"
+                              : "SMP independent address spaces: FAIL\n");
     return ok;
 }

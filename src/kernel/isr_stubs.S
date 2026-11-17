@@ -19,6 +19,7 @@
 .global isr_common
 .extern isr_handler
 .extern scheduler_switch
+.extern scheduler_finish_switch
 
 isr_common:
     # Save all general purpose registers
@@ -47,6 +48,13 @@ isr_common:
     mov %rsp, %rdi
     call scheduler_switch
     mov %rax, %rsp # Update RSP with the new or the same context
+    cmpq $241, 120(%rsp)
+    je 1f
+    mov %rsp, %r12
+    andq $-16, %rsp
+    call scheduler_finish_switch
+    mov %r12, %rsp
+1:
 
     # Restore all general purpose registers
     pop %rax
@@ -122,8 +130,8 @@ ISR_ERR 21
 
 syscall_entry:
     # Save user stack, load kernel stack
-    mov %rsp, g_user_rsp(%rip)
-    mov g_kernel_rsp(%rip), %rsp
+    mov %rsp, %gs:8
+    mov %gs:0, %rsp
 
     push %r11        # user RFLAGS
     push %rcx        # user RIP (for sysretq)
@@ -169,5 +177,5 @@ syscall_entry:
     pop %r11         # restore user RFLAGS
 
     # Restore user stack
-    mov g_user_rsp(%rip), %rsp
+    mov %gs:8, %rsp
     sysretq

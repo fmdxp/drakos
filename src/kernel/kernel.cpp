@@ -105,10 +105,20 @@ extern "C" [[noreturn]] void kernel_main(void)
     // 3. Enable XSAVE and AVX only AFTER checking CPUID
     enable_fpu_and_avx();
     
-    // 4. Initialize Scheduler and create test threads
-    scheduler_init();
+    // Start AP service loops first, then initialize each per-CPU run-queue
+    // state and release APs into the shared scheduler.
     if (!smp_initialize()) panic("SMP initialization failed");
+    scheduler_init();
     if (command_line_has_test(command_line)) run_address_space_runtime_test();
+    scheduler_start_application_processors();
+    if (command_line_has_test(command_line)) {
+        if (!run_smp_kernel_scheduler_runtime_test())
+            panic("SMP kernel scheduler runtime test failed");
+        if (!run_smp_user_scheduler_runtime_test())
+            panic("SMP user scheduler runtime test failed");
+        if (!run_smp_independent_user_runtime_test())
+            panic("SMP independent address-space runtime test failed");
+    }
     
     // 5. Make all the kernel threads and processes
     make_threads_and_processes();

@@ -95,7 +95,7 @@ extern "C" void isr_handler(Context* ctx) {
             }
             // Block the faulting thread so scheduler won't schedule it again
             Thread* t = scheduler_get_current_thread();
-            if (t) t->state = THREAD_DEAD;
+            if (t) scheduler_terminate_thread(t);
             // EOI so APIC doesn't lock up, then yield to next thread
             lapic_eoi();
             scheduler_yield();

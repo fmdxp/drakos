@@ -25,11 +25,9 @@
 #include "vmm.hpp"
 #include "pmm.hpp"
 #include "kernel/panic.hpp"
+#include "kernel/smp.hpp"
 #include "cpu.hpp"
 #include <stddef.h>
-
-uint64_t g_kernel_rsp = 0;
-uint64_t g_user_rsp   = 0;
 
 extern volatile uint64_t g_system_ticks;
 
@@ -74,6 +72,7 @@ void enable_syscalls() {
 }
 
 extern "C" void syscall_handler(SyscallFrame* frame) {
+    smp_note_syscall();
     int64_t ret = -ENOSYS;
     
     switch (frame->num) {
@@ -318,7 +317,7 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
 
         case 60: // exit (status)
             if (scheduler_get_current_thread()) {
-                scheduler_get_current_thread()->state = THREAD_DEAD;
+                scheduler_terminate_thread(scheduler_get_current_thread());
                 scheduler_yield(); // Will never return here
             }
             break;

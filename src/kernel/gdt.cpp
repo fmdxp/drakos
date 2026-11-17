@@ -18,6 +18,15 @@
 
 
 #include "gdt.hpp"
+#include "kernel/smp.hpp"
+
+static constexpr uint32_t MAX_GDT_CPUS = 256;
+struct PerCpuGdt {
+    GDTEntry entries[7];
+    GDTPointer pointer;
+    TSSEntry tss;
+};
+static PerCpuGdt s_cpu_gdts[MAX_GDT_CPUS];
 
 // External assembly function to reload segment registers after GDT update
 // We will write it using inline assembly here to keep it pure C++
@@ -41,6 +50,30 @@ static void reload_segments() {
         : "i"(0x08), "i"(0x10) // 0x08 = Kernel Code, 0x10 = Kernel Data
         : "rax", "memory"
     );
+}
+
+static void build_cpu_gdt(PerCpuGdt& cpu, uintptr_t kernel_stack) {
+    for (size_t i = 0; i < sizeof(cpu); ++i) reinterpret_cast<uint8_t*>(&cpu)[i] = 0;
+    auto set_entry = [&](int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags) {
+        cpu.entries[index].base_low = base & 0xFFFF;
+        cpu.entries[index].base_middle = (base >> 16) & 0xFF;
+        cpu.entries[index].base_high = (base >> 24) & 0xFF;
+        cpu.entries[index].limit_low = limit & 0xFFFF;
+        cpu.entries[index].flags = ((limit >> 16) & 0x0F) | (flags & 0xF0);
+        cpu.entries[index].access = access;
+    };
+    set_entry(1, 0, 0xFFFFF, 0x9A, 0xA0);
+    set_entry(2, 0, 0xFFFFF, 0x92, 0xC0);
+    set_entry(3, 0, 0xFFFFF, 0xF2, 0xC0);
+    set_entry(4, 0, 0xFFFFF, 0xFA, 0xA0);
+    cpu.tss.rsp0 = kernel_stack;
+    cpu.tss.iopb_offset = sizeof(TSSEntry);
+    uintptr_t base = reinterpret_cast<uintptr_t>(&cpu.tss);
+    set_entry(5, static_cast<uint32_t>(base), sizeof(TSSEntry) - 1, 0x89, 0);
+    cpu.entries[6].limit_low = (base >> 32) & 0xFFFF;
+    cpu.entries[6].base_low = (base >> 48) & 0xFFFF;
+    cpu.pointer.limit = sizeof(cpu.entries) - 1;
+    cpu.pointer.base = reinterpret_cast<uintptr_t>(cpu.entries);
 }
 
 bool GDT::start() {
@@ -93,12 +126,22 @@ const char* GDT::get_name() const {
 }
 
 void GDT::set_kernel_stack(uintptr_t stack) {
+    if (!smp_is_bootstrap_processor()) {
+        uint32_t index = smp_current_processor_index();
+        if (index < MAX_GDT_CPUS) s_cpu_gdts[index].tss.rsp0 = stack;
+        return;
+    }
     tss.rsp0 = stack;
 }
 
 void GDT::load_cpu_descriptors() {
-    asm volatile("lgdt %0" : : "m"(pointer));
+    uint32_t index = smp_current_processor_index();
+    if (index >= MAX_GDT_CPUS) for (;;) asm volatile("cli; hlt");
+    PerCpuGdt& cpu = s_cpu_gdts[index];
+    build_cpu_gdt(cpu, 0);
+    asm volatile("lgdt %0" : : "m"(cpu.pointer));
     reload_segments();
+    asm volatile("ltr %0" : : "r"((uint16_t)0x28));
 }
 
 void GDT::set_entry(int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags) {

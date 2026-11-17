@@ -49,6 +49,7 @@ public:
     // Acknowledge an interrupt
     void eoi();
     void initialize_current_cpu();
+    void start_current_cpu_timer();
     bool send_ipi(uint32_t apic_id, uint8_t vector);
 
     // Read a Local APIC register
@@ -66,3 +67,5 @@ extern LocalAPIC* g_lapic;
 // Global helper to send End of Interrupt
 void lapic_eoi();
 bool lapic_send_ipi(uint32_t apic_id, uint8_t vector);
+uint32_t lapic_lock_wait_begin();
+void lapic_lock_wait_end(uint32_t saved_tpr);

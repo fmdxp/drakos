@@ -76,6 +76,7 @@ enum class VmmAddressSpaceResult : uint8_t {
     ActiveAddressSpace,
     AddressSpaceInUse,
     OutOfMemory,
+    Busy,
 };
 
 // Map a virtual address to a physical address with the given flags in the CURRENT address space.
@@ -104,6 +105,9 @@ uintptr_t vmm_create_address_space();
 
 // Switch to a new address space
 VmmAddressSpaceResult vmm_switch_address_space(uintptr_t pml4_phys);
+// Nonblocking form for interrupt-time scheduler transitions. Busy means no
+// state was changed and the caller may retry after servicing shootdown IPIs.
+VmmAddressSpaceResult vmm_try_switch_address_space(uintptr_t pml4_phys);
 
 // Address spaces created by VMM are reference-counted while threads can run
 // them. Destruction succeeds only for an inactive root with no references.

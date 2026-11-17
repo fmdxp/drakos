@@ -20,6 +20,7 @@
 #include "heap.hpp"
 #include "pmm.hpp"
 #include "vmm.hpp"
+#include "drivers/lapic.hpp"
 
 #include <stdint.h>
 
@@ -75,7 +76,13 @@ static uint64_t lock_heap() {
 #else
     uint64_t flags;
     asm volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
-    while (__atomic_test_and_set(&s_heap_lock, __ATOMIC_ACQUIRE)) asm volatile("pause");
+    bool waiting = false;
+    uint32_t saved_tpr = 0;
+    while (__atomic_test_and_set(&s_heap_lock, __ATOMIC_ACQUIRE)) {
+        if (!waiting) { saved_tpr = lapic_lock_wait_begin(); waiting = true; }
+        asm volatile("sti; pause; cli" ::: "memory");
+    }
+    if (waiting) lapic_lock_wait_end(saved_tpr);
     return flags;
 #endif
 }

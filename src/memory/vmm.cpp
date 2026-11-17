@@ -23,6 +23,7 @@
 #include "kernel/smp.hpp"
 #include "cpu.hpp"
 #include "kernel/panic.hpp"
+#include "drivers/lapic.hpp"
 
 // -------------------------------------------------------------------
 // X86_64 PAGING STRUCTURES
@@ -122,9 +123,13 @@ static inline uint64_t lock_vmm() {
 #else
     uint64_t flags;
     asm volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    bool waiting = false;
+    uint32_t saved_tpr = 0;
     while (__atomic_test_and_set(&s_vmm_lock, __ATOMIC_ACQUIRE)) {
-        asm volatile("pause");
+        if (!waiting) { saved_tpr = lapic_lock_wait_begin(); waiting = true; }
+        asm volatile("sti; pause; cli" ::: "memory");
     }
+    if (waiting) lapic_lock_wait_end(saved_tpr);
     return flags;
 #endif
 }
@@ -135,6 +140,22 @@ static inline void unlock_vmm(uint64_t flags) {
     if (flags & 0x200) asm volatile("sti" ::: "memory");
 #else
     (void)flags;
+#endif
+}
+
+static inline bool try_lock_vmm(uint64_t* saved_flags) {
+#ifdef DRAKOS_HOST_TEST
+    *saved_flags = 0;
+    return true;
+#else
+    uint64_t flags;
+    asm volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    if (__atomic_test_and_set(&s_vmm_lock, __ATOMIC_ACQUIRE)) {
+        if (flags & 0x200) asm volatile("sti" ::: "memory");
+        return false;
+    }
+    *saved_flags = flags;
+    return true;
 #endif
 }
 
@@ -211,6 +232,10 @@ static void invalidate_page_all_cpus(uintptr_t virt) {
 }
 
 static void flush_address_spaces_all_cpus() {
+    // The caller may itself be an AP executing with interrupts disabled. Reload
+    // this CPU's current root locally, then send shootdown IPIs only to peers.
+    uintptr_t current_root = read_cr3();
+    write_cr3(current_root);
     if (!smp_tlb_flush_non_global()) panic("TLB full flush timed out");
 }
 
@@ -583,6 +608,29 @@ VmmAddressSpaceResult vmm_switch_address_space(uintptr_t root) {
         for (size_t i = 256; i < 512; ++i) dst->entries[i] = src->entries[i];
     }
     write_cr3(root);
+#ifndef DRAKOS_HOST_TEST
+    smp_set_local_active_root(root);
+#endif
+    unlock_vmm(lock_flags);
+    return VmmAddressSpaceResult::Success;
+}
+
+VmmAddressSpaceResult vmm_try_switch_address_space(uintptr_t root) {
+    uint64_t lock_flags;
+    if (!try_lock_vmm(&lock_flags)) return VmmAddressSpaceResult::Busy;
+    if (!valid_root(root)) {
+        unlock_vmm(lock_flags);
+        return VmmAddressSpaceResult::InvalidAddressSpace;
+    }
+    if (root != s_kernel_pml4) {
+        PageTable* dst = reinterpret_cast<PageTable*>(root + pmm_hhdm_offset());
+        PageTable* src = reinterpret_cast<PageTable*>(s_kernel_pml4 + pmm_hhdm_offset());
+        for (size_t i = 256; i < 512; ++i) dst->entries[i] = src->entries[i];
+    }
+    write_cr3(root);
+#ifndef DRAKOS_HOST_TEST
+    smp_set_local_active_root(root);
+#endif
     unlock_vmm(lock_flags);
     return VmmAddressSpaceResult::Success;
 }

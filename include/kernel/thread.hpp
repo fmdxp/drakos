@@ -48,6 +48,11 @@ public:
 
     // Process is user-mode process?
     bool is_user;
+    uint32_t scheduler_threads;
+    bool terminating;
+    uintptr_t next_user_stack_top;
+    bool scheduler_cleanup_pending;
+    Process* scheduler_next_pending;
 
     // TODO: Zircon-style Handle Table for Capabilities
 };
@@ -56,6 +61,7 @@ public:
 enum ThreadState {
     THREAD_RUNNING,     // Thread is running
     THREAD_READY,       // Thread is ready to be run
+    THREAD_SWITCHING,   // Saved context is not yet safe to run on another CPU
     THREAD_BLOCKED,     // Thread is suspended, waiting for an external event
     THREAD_SLEEPING,    // Thread is suspended, waiting for a specific time (es: sleep(1000);)
     THREAD_DEAD,        // Thread is killed or ended its execution, and it's waiting to be freed up
@@ -87,6 +93,10 @@ public:
     // Thread state (e.g., Ready, Running, Blocked)
     ThreadState state;
     bool address_space_retained;
+    bool scheduler_enrolled;
+    bool process_final_thread;
+    uint32_t last_cpu;
+    uint32_t cpu_migrations;
     
     // Simple Round-Robin scheduler link
     Thread* next;
@@ -94,9 +104,17 @@ public:
 
 // Scheduler APIs
 void scheduler_init();
+void scheduler_start_application_processors();
+void scheduler_activate_current_processor();
 void scheduler_add_thread(Thread* thread);
 extern "C" Context* scheduler_switch(Context* current_context);
+extern "C" void scheduler_finish_switch();
 void scheduler_block_current_thread();
 void scheduler_wake_thread(Thread* t);
+void scheduler_terminate_thread(Thread* t);
 void scheduler_yield();
 Thread* scheduler_get_current_thread();
+uint32_t scheduler_count_running_process_cpus(const Process* process);
+uint32_t scheduler_count_process_threads(const Process* process);
+uint32_t scheduler_enabled_processor_count();
+uint32_t scheduler_thread_migration_count(const Thread* thread);

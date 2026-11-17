@@ -81,6 +81,12 @@ void LocalAPIC::initialize_current_cpu() {
     write(LAPIC_LVT_TMR, 1U << 16); // APs service shootdowns, not scheduler ticks.
 }
 
+void LocalAPIC::start_current_cpu_timer() {
+    write(LAPIC_TMRDIV, 0x03);
+    write(LAPIC_LVT_TMR, 32 | 0x20000);
+    write(LAPIC_TMRINITCNT, 1000000);
+}
+
 bool LocalAPIC::send_ipi(uint32_t apic_id, uint8_t vector) {
     if (apic_id > 0xFF) return false;
     for (uint32_t spin = 0; spin < 1000000; ++spin) {
@@ -99,6 +105,21 @@ bool LocalAPIC::send_ipi(uint32_t apic_id, uint8_t vector) {
 
 bool lapic_send_ipi(uint32_t apic_id, uint8_t vector) {
     return g_lapic && g_lapic->send_ipi(apic_id, vector);
+}
+
+uint32_t lapic_lock_wait_begin() {
+    if (!g_lapic) return 0;
+    uint32_t saved = g_lapic->read(LAPIC_TPR);
+    // While waiting on a cross-CPU spinlock, admit only priority-class F
+    // shootdown IPIs (vector 241). This lets lock owners finish invalidation
+    // without allowing a nested timer to schedule on the waiter's stack.
+    g_lapic->write(LAPIC_TPR, 0xE0);
+    return saved | 0x80000000U;
+}
+
+void lapic_lock_wait_end(uint32_t saved_tpr) {
+    if (g_lapic && (saved_tpr & 0x80000000U))
+        g_lapic->write(LAPIC_TPR, saved_tpr & 0x00FFFFFFU);
 }
 
 

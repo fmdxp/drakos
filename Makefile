@@ -196,7 +196,15 @@ qemu-test-address-space: $(ISO)
 	truncate -s 32M "$$test_root/disk.img"; \
 	set +e; timeout 20s qemu-system-x86_64 -cpu max -smp 4 -bios /usr/share/ovmf/OVMF.fd -cdrom "$$test_root/test.iso" -m 256M -display none -serial "file:$$test_root/serial.log" -monitor none -no-reboot -device ahci,id=ahci -drive "file=$$test_root/disk.img,format=raw,if=none,id=disk" -device ide-hd,bus=ahci.0,drive=disk; qemu_status=$$?; set -e; \
 	if [ "$$qemu_status" -ne 124 ]; then cat "$$test_root/serial.log"; echo "QEMU exited unexpectedly: $$qemu_status"; exit 1; fi; \
-	cat "$$test_root/serial.log"; grep -q 'address-space test: PASS' "$$test_root/serial.log"
+	cat "$$test_root/serial.log"; \
+	grep -q 'address-space test: PASS' "$$test_root/serial.log"; \
+	grep -q 'SMP scheduler CPU initialization: PASS' "$$test_root/serial.log"; \
+	grep -q 'SMP concurrent kernel threads: PASS' "$$test_root/serial.log"; \
+	grep -q 'SMP thread migration: PASS' "$$test_root/serial.log"; \
+	grep -q 'SMP shared address-space execution: PASS' "$$test_root/serial.log"; \
+	grep -q 'SMP AP syscall progress: PASS' "$$test_root/serial.log"; \
+	grep -q 'SMP concurrent process teardown: PASS' "$$test_root/serial.log"; \
+	grep -q 'SMP independent address spaces: PASS' "$$test_root/serial.log"
 
 debug: $(ISO) images seed_disk
 	qemu-system-x86_64 \
