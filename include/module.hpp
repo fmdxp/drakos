@@ -22,17 +22,22 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "kernel/initcall_registry.hpp"
+#ifdef DRAKOS_HOST_TEST
+#include <new>
+#endif
 
 // PLACEMENT NEW OPERATOR
 // Allows calling C++ constructors on statically allocated
 // memory without needing a Heap/Allocator.
 
+#ifndef DRAKOS_HOST_TEST
 inline void* operator new(size_t, void* p) noexcept {
     return p;
 }
 inline void* operator new[](size_t, void* p) noexcept {
     return p;
 }
+#endif
 
 // OPERATOR DELETE (no-op)
 // Modules are statically allocated and never freed. However, the C++ compiler

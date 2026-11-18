@@ -48,6 +48,7 @@ public:
     int   write(Node* node, const void* buf, uint32_t offset, uint32_t size) override;
     bool  listdir(Node* dir, DirEntry* out, uint32_t max, uint32_t& count) override;
     void  release(Node* node) override;
+    uint64_t file_identity(const Node* node) const override;
 
 private:
     FAT32::FAT32Driver m_fat;

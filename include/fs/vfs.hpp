@@ -20,6 +20,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include "kernel/handle.hpp"
 
 namespace VFS {
 
@@ -65,6 +66,13 @@ public:
 
     // Free node resources
     virtual void release(Node* node) = 0;
+
+    // Stable per-filesystem file identity used by future cache-backed mappings.
+    // Drivers with a durable inode identifier should override this default.
+    virtual uint64_t file_identity(const Node* node) const {
+        (void)node;
+        return 0;
+    }
 };
 
 // ─── Open flags / seek whence ─────────────────────────────────────────────────
@@ -82,10 +90,35 @@ static constexpr int MAX_FDS    = 64;
 static constexpr int MAX_MOUNTS = 16;
 
 struct FileDescriptor {
-    Node*    node   = nullptr;
-    uint32_t offset = 0;
-    uint32_t flags  = 0;
+    class FileObject* file = nullptr;
     bool     used   = false;
+};
+
+class FileObject final : public KernelObject {
+public:
+    FileObject(Node* owned_node, uint32_t flags);
+    ~FileObject() override;
+
+    int read(void* buffer, uint32_t size);
+    int read_at(uint64_t offset, void* buffer, uint32_t size);
+    int write(const void* buffer, uint32_t size);
+    int write_at(uint64_t offset, const void* buffer, uint32_t size);
+    int seek(int32_t offset, int whence);
+    uint64_t size();
+    uint32_t open_flags() const { return m_flags; }
+    FileSystem* filesystem() const { return m_node ? m_node->fs : nullptr; }
+    uint64_t identity() const;
+
+private:
+    Node* m_node;
+    uint32_t m_flags;
+    uint32_t m_offset;
+    volatile bool m_lock;
+
+    void lock(uint64_t& flags, uint32_t& saved_tpr);
+    void unlock(uint64_t flags, uint32_t saved_tpr);
+    int read_at_locked(uint64_t offset, void* buffer, uint32_t size);
+    int write_at_locked(uint64_t offset, const void* buffer, uint32_t size);
 };
 
 struct MountEntry {
@@ -102,6 +135,7 @@ public:
     bool  unmount(const char* path);
 
     int   open(const char* path, int flags = VFS_O_READ);
+    FileObject* open_file(const char* path, int flags = VFS_O_READ);
     int   read(int fd, void* buf, uint32_t size);
     int   write(int fd, const void* buf, uint32_t size);
     int   seek(int fd, int32_t offset, int whence);
@@ -113,9 +147,12 @@ public:
 private:
     FileDescriptor m_fds[MAX_FDS]       = {};
     MountEntry     m_mounts[MAX_MOUNTS] = {};
+    volatile bool  m_lock = false;
 
-    FileSystem* resolve(const char* path, const char** rel_path_out);
+    FileSystem* resolve(const char* path, char* rel_path_out, size_t rel_capacity);
     int         alloc_fd();
+    uint64_t    lock_manager();
+    void        unlock_manager(uint64_t flags);
 };
 
 } // namespace VFS
@@ -123,6 +160,7 @@ private:
 // ─── Global convenience API ──────────────────────────────────────────────────
 bool    vfs_mount(const char* path, VFS::FileSystem* fs);
 int     vfs_open(const char* path, int flags = VFS_O_READ);
+VFS::FileObject* vfs_open_file(const char* path, int flags = VFS_O_READ);
 int     vfs_read(int fd, void* buf, uint32_t size);
 int     vfs_write(int fd, const void* buf, uint32_t size);
 int     vfs_seek(int fd, int32_t offset, int whence);

@@ -295,7 +295,7 @@ static bool run_user_mmap_test(bool verify_munmap) {
     }
 
     uintptr_t root = process->page_table_phys;
-    uintptr_t expected_address = mapped_va + (verify_munmap ? PAGE_SIZE : 0);
+    uintptr_t expected_address = mapped_va;
     address_space_runtime_expect_fault(expected_address, 14);
     scheduler_add_thread(thread);
     if (thread->state == THREAD_DEAD) {
@@ -526,6 +526,8 @@ bool run_address_space_runtime_test() {
     uintptr_t stress_frame_b = pmm_alloc_page();
     constexpr uintptr_t stress_va = 0x0000000055555000ULL;
     bool stress_ok = stress_count == 260 && stress_frame_a && stress_frame_b;
+    if (stress_count != 260) boot_diagnostics_write("address-space registry stress: root allocation stopped early\n");
+    if (!stress_frame_a || !stress_frame_b) boot_diagnostics_write("address-space registry stress: frame allocation failed\n");
     if (stress_ok) {
         stress_ok &= vmm_map_owned_page(stress_roots[0], stress_va, stress_frame_a,
             VMM_PRESENT | VMM_USER) == VmmMapResult::Success;

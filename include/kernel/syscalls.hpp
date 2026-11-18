@@ -35,6 +35,7 @@ struct SyscallFrame {
 #define EFAULT   14
 #define EINVAL   22
 #define ESPIPE   29
+#define EMFILE   24
 #define ENOSYS   38
 
 extern "C" void syscall_entry();

@@ -221,4 +221,25 @@ void Fat32FS::release(Node* node) {
     delete node;
 }
 
+uint64_t Fat32FS::file_identity(const Node* node) const {
+    if (!node || node->fs != this || !node->fs_data) return 0;
+    const Fat32FileInfo* info = static_cast<const Fat32FileInfo*>(node->fs_data);
+    uint64_t hash = 1469598103934665603ULL;
+    auto mix = [&](uint8_t byte) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    };
+    for (size_t i = 0; i < sizeof(info->parent_dir_cluster); ++i)
+        mix(static_cast<uint8_t>(info->parent_dir_cluster >> (i * 8)));
+    for (size_t i = 0; i < sizeof(info->first_cluster); ++i)
+        mix(static_cast<uint8_t>(info->first_cluster >> (i * 8)));
+    for (size_t i = 0; node->name[i]; ++i) {
+        char c = node->name[i];
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        mix(static_cast<uint8_t>(c));
+    }
+    mix(static_cast<uint8_t>(node->type));
+    return hash;
+}
+
 } // namespace VFS

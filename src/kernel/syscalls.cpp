@@ -60,6 +60,22 @@ static bool copy_user_string(uintptr_t address, char* output, size_t capacity) {
     return false;
 }
 
+static Process* current_user_process() {
+    Thread* current = scheduler_get_current_thread();
+    if (!current || !current->parent_process || !current->parent_process->is_user)
+        return nullptr;
+    return current->parent_process;
+}
+
+static VFS::FileObject* acquire_user_file(uint64_t handle, uint32_t rights) {
+    if (handle > INT32_MAX) return nullptr;
+    Process* process = current_user_process();
+    if (!process) return nullptr;
+    KernelObject* object = process->handles.acquire(static_cast<int32_t>(handle),
+        KernelObjectType::File, rights);
+    return static_cast<VFS::FileObject*>(object);
+}
+
 void enable_syscalls() {
     uint64_t efer = rdmsr(0xC0000080);
     efer |= 1;
@@ -79,8 +95,11 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
         case 0: // read (fd, buf, count)
             if (frame->rdx > UINT32_MAX || !user_range_access(frame->rsi, frame->rdx, true)) ret = -EFAULT;
             else if (frame->rdi == 0) ret = 0; // EOF on stdin
-            else if (frame->rdi > 2) ret = vfs_read((int)frame->rdi - 3, (void*)frame->rsi, (uint32_t)frame->rdx);
-            else ret = -EBADF;
+            else if (frame->rdi > 2) {
+                VFS::FileObject* file = acquire_user_file(frame->rdi, HANDLE_RIGHT_READ);
+                if (!file) ret = -EBADF;
+                else { ret = file->read((void*)frame->rsi, (uint32_t)frame->rdx); file->release(); }
+            } else ret = -EBADF;
             break;
 
         case 1: // write (fd, buf, count)
@@ -95,7 +114,9 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
                 }
                 ret = frame->rdx;
             } else if (frame->rdi > 2) {
-                ret = vfs_write((int)frame->rdi - 3, (const void*)frame->rsi, (uint32_t)frame->rdx);
+                VFS::FileObject* file = acquire_user_file(frame->rdi, HANDLE_RIGHT_WRITE);
+                if (!file) ret = -EBADF;
+                else { ret = file->write((const void*)frame->rsi, (uint32_t)frame->rdx); file->release(); }
             } else {
                 ret = -EBADF;
             }
@@ -105,19 +126,51 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
         {
             char filename[256];
             if (!copy_user_string(frame->rdi, filename, sizeof(filename))) { ret = -EFAULT; break; }
-            ret = vfs_open(filename, (int)frame->rsi);
-            if (ret >= 0) ret += 3; // Shift fds to leave 0,1,2 free
-            else ret = -ENOENT;
+            if (frame->rsi > INT32_MAX) { ret = -EINVAL; break; }
+            Process* process = current_user_process();
+            if (!process) { ret = -EPERM; break; }
+            constexpr uint64_t O_ACCMODE = 3;
+            constexpr uint64_t O_CREAT = 0x40;
+            uint64_t raw_flags = frame->rsi;
+            uint64_t supported = O_ACCMODE | O_CREAT;
+            if (raw_flags & ~supported) { ret = -ENOSYS; break; }
+            uint64_t access = raw_flags & O_ACCMODE;
+            if (access == O_ACCMODE) { ret = -EINVAL; break; }
+            int open_flags = access == 0 ? VFS_O_READ :
+                             access == 1 ? VFS_O_WRITE : VFS_O_RDWR;
+            if (raw_flags & O_CREAT) open_flags |= VFS_O_CREATE;
+            VFS::FileObject* file = vfs_open_file(filename, open_flags);
+            if (!file) { ret = -ENOENT; break; }
+            uint32_t rights = HANDLE_RIGHT_DUPLICATE;
+            if (file->open_flags() & VFS_O_READ) rights |= HANDLE_RIGHT_READ;
+            if (file->open_flags() & VFS_O_WRITE) rights |= HANDLE_RIGHT_WRITE;
+            ret = process->handles.install(file, rights);
+            file->release();
+            if (ret < 0) ret = -EMFILE;
             break;
         }
 
         case 3: // close (fd)
-            if (frame->rdi > 2) ret = vfs_close((int)frame->rdi - 3);
+            if (frame->rdi > 2 && frame->rdi <= INT32_MAX) {
+                Process* process = current_user_process();
+                ret = process && process->handles.close(static_cast<int32_t>(frame->rdi)) ? 0 : -EBADF;
+            }
+            else if (frame->rdi > INT32_MAX) ret = -EBADF;
             else ret = 0; // close stdout/stderr does nothing for now
             break;
 
         case 8: // lseek (fd, offset, whence)
-            if (frame->rdi > 2) ret = vfs_seek((int)frame->rdi - 3, (int32_t)frame->rsi, (int)frame->rdx);
+            if (frame->rdi > 2) {
+                VFS::FileObject* file = acquire_user_file(frame->rdi, 0);
+                if (!file) ret = -EBADF;
+                else {
+                    int64_t offset = static_cast<int64_t>(frame->rsi);
+                    if (offset < INT32_MIN || offset > INT32_MAX || frame->rdx > INT32_MAX)
+                        ret = -EINVAL;
+                    else ret = file->seek(static_cast<int32_t>(offset), static_cast<int>(frame->rdx));
+                    file->release();
+                }
+            }
             else ret = -ESPIPE;
             break;
 
@@ -125,13 +178,15 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
             uint64_t addr = frame->rdi;
             uint64_t length = frame->rsi;
             uint64_t prot = frame->rdx;
-            int flags = frame->r10;
-            // int fd = frame->r8;
-            // int offset = frame->r9;
+            uint64_t flags = frame->r10;
 
             // Only support MAP_ANONYMOUS | MAP_PRIVATE (typically 0x22 in Linux) for now
-            if ((flags & 0x20) == 0 || (flags & ~0x22) != 0) {
+            if ((flags & 0x20) == 0 || (flags & ~0x22ULL) != 0) {
                 ret = -ENOSYS; // File mapping not supported yet
+                break;
+            }
+            if ((frame->r8 != UINT64_MAX && frame->r8 != UINT32_MAX) || frame->r9 != 0) {
+                ret = -EINVAL;
                 break;
             }
             if ((prot & ~0x7) != 0 || prot == 0 || (prot & 0x6) == 0x6) {
@@ -145,12 +200,21 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
             }
             uint64_t rounded_length = (length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
             constexpr uintptr_t USER_LIMIT = 1ULL << 47;
-            // Simple allocator: just pick an address if NULL
-            static uintptr_t next_mmap = 0x100000000; // 4GB line
+            if (rounded_length >= USER_LIMIT) { ret = -EINVAL; break; }
+            Process* process = current_user_process();
+            if (!process) { ret = -EPERM; break; }
             if (addr == 0) {
-                if (next_mmap > USER_LIMIT - rounded_length) { ret = -ENOMEM; break; }
-                addr = next_mmap;
-                next_mmap += rounded_length;
+                uintptr_t next = __atomic_load_n(&process->next_mmap_address, __ATOMIC_RELAXED);
+                for (;;) {
+                    if (next > USER_LIMIT - rounded_length) { ret = -ENOMEM; break; }
+                    uintptr_t following = next + rounded_length;
+                    if (__atomic_compare_exchange_n(&process->next_mmap_address, &next, following,
+                                                    false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+                        addr = next;
+                        break;
+                    }
+                }
+                if (ret == -ENOMEM) break;
             }
             if ((addr & (PAGE_SIZE - 1)) || addr >= USER_LIMIT ||
                 rounded_length > USER_LIMIT - addr) {
@@ -158,45 +222,16 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
                 break;
             }
 
-            uint64_t num_pages = rounded_length / PAGE_SIZE;
-            Thread* current = scheduler_get_current_thread();
-            uintptr_t root = current && current->parent_process
-                ? current->parent_process->page_table_phys : vmm_get_kernel_pml4();
-            if (!current || !current->parent_process || !current->parent_process->is_user) {
-                ret = -EPERM;
-                break;
-            }
-            uint64_t map_flags = VMM_PRESENT | VMM_USER;
-            if (prot & 0x2) map_flags |= VMM_WRITE;
-            if (!(prot & 0x4) && nx_enabled()) map_flags |= VMM_NX;
-            uint64_t mapped_pages = 0;
-            for (; mapped_pages < num_pages; mapped_pages++) {
-                uintptr_t phys = pmm_alloc_page();
-                if (!phys) {
-                    ret = -ENOMEM;
-                    break;
-                }
-                auto* zero_page = reinterpret_cast<volatile uint64_t*>(phys + pmm_hhdm_offset());
-                for (size_t word = 0; word < PAGE_SIZE / sizeof(uint64_t); ++word)
-                    zero_page[word] = 0;
-                VmmMapResult map_result = vmm_map_owned_page(root, addr + mapped_pages * 0x1000, phys,
-                                                   map_flags);
-                if (map_result != VmmMapResult::Success) {
-                    pmm_free_page(phys);
-                    ret = (map_result == VmmMapResult::PageTableOutOfMemory) ? -ENOMEM : -EINVAL;
-                    break;
-                }
-            }
-
-            if (mapped_pages == num_pages) {
-                ret = addr;
-            } else {
-                while (mapped_pages > 0) {
-                    --mapped_pages;
-                    if (vmm_unmap_page(root, addr + mapped_pages * PAGE_SIZE) != VmmUnmapResult::Success)
-                        panic("mmap rollback failed");
-                }
-            }
+            uint8_t permissions = 0;
+            if (prot & 0x1) permissions |= VM_PERM_READ;
+            if (prot & 0x2) permissions |= VM_PERM_READ | VM_PERM_WRITE;
+            if (prot & 0x4) permissions |= VM_PERM_EXECUTE;
+            VmRegion region{permissions, VmRegionType::Anonymous, VmRegionSharing::Private, 0,
+                            static_cast<uintptr_t>(addr), static_cast<uintptr_t>(addr + rounded_length),
+                            0, nullptr};
+            VmRegionResult added = process->vm_regions.insert(region);
+            ret = added == VmRegionResult::Success ? static_cast<int64_t>(addr) :
+                  (added == VmRegionResult::CapacityExceeded ? -ENOMEM : -EINVAL);
             break;
         }
 
@@ -215,32 +250,29 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
             constexpr uintptr_t USER_LIMIT = 1ULL << 47;
             if (pages > (UINT64_MAX - addr) / PAGE_SIZE || addr >= USER_LIMIT ||
                 pages > (USER_LIMIT - addr) / PAGE_SIZE) { ret = -EINVAL; break; }
-            Thread* current = scheduler_get_current_thread();
-            uintptr_t root = current && current->parent_process
-                ? current->parent_process->page_table_phys : vmm_get_kernel_pml4();
-            if (!current || !current->parent_process || !current->parent_process->is_user) {
+            Process* process = current_user_process();
+            if (!process) {
                 ret = -EPERM;
                 break;
             }
-            // Validate the full range first so an obviously invalid request does not
-            // partially remove mappings. Large-page splitting can still fail later.
-            bool valid = true;
-            for (uint64_t i = 0; i < pages; ++i) {
-                VmmMappingInfo mapping = {};
-                uintptr_t page = addr + i * PAGE_SIZE;
-                if (!vmm_query_mapping(page, &mapping) || !(mapping.flags & VMM_USER) ||
-                    mapping.ownership != VmmMappingInfo::Ownership::Owned) {
-                    valid = false;
-                    break;
-                }
+            uintptr_t end = addr + pages * PAGE_SIZE;
+            if (!process->vm_regions.covers(addr, end) ||
+                process->vm_regions.remove(addr, end) != VmRegionResult::Success) {
+                ret = -EINVAL;
+                break;
             }
-            if (!valid) { ret = -EINVAL; break; }
             ret = 0;
             for (uint64_t i = 0; i < pages; ++i) {
-                VmmUnmapResult result = vmm_unmap_page(root, addr + i * PAGE_SIZE);
+                uintptr_t page = addr + i * PAGE_SIZE;
+                VmmMappingInfo mapping = {};
+                if (!vmm_query_mapping(page, &mapping)) continue;
+                if (!(mapping.flags & VMM_USER) ||
+                    mapping.ownership != VmmMappingInfo::Ownership::Owned) {
+                    panic("anonymous munmap found a non-owned page");
+                }
+                VmmUnmapResult result = vmm_unmap_page(process->page_table_phys, page);
                 if (result != VmmUnmapResult::Success) {
-                    (void)result;
-                    panic("munmap failed after range validation");
+                    panic("munmap failed after region removal");
                 }
             }
             break;
@@ -265,8 +297,14 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
                 *st_size = 0;
             } else {
                 *st_mode = 0x81B6; // S_IFREG | 0666
-                if (frame->num == 5 && frame->rdi > 2) {
-                    *st_size = vfs_filesize((int)frame->rdi - 3);
+                if (frame->num == 5 && frame->rdi > 2 && frame->rdi <= INT32_MAX) {
+                    VFS::FileObject* file = acquire_user_file(frame->rdi, 0);
+                    if (!file) { ret = -EBADF; break; }
+                    *st_size = file->size();
+                    file->release();
+                } else if (frame->num == 5 && frame->rdi > INT32_MAX) {
+                    ret = -EBADF;
+                    break;
                 } else {
                     *st_size = 0;
                 }
@@ -362,10 +400,19 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
         case 80: // chdir
         case 83: // mkdir
         case 84: // rmdir
-        case 32: // dup
         case 33: // dup2
             ret = -ENOSYS; // Not implemented yet
             break;
+
+        case 32: { // dup
+            Process* process = current_user_process();
+            if (!process || frame->rdi > INT32_MAX) ret = -EBADF;
+            else {
+                ret = process->handles.duplicate(static_cast<int32_t>(frame->rdi));
+                if (ret < 0) ret = -EBADF;
+            }
+            break;
+        }
 
         case 95: // umask
             ret = 022;

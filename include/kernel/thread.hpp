@@ -20,6 +20,8 @@
 #pragma once
 
 #include <stdint.h>
+#include "kernel/handle.hpp"
+#include "kernel/vm_region.hpp"
 
 // Avx/Fpu State Size (2688 for AVX512, 512 for standard FXSAVE)
 // We allocate enough space to safely use XSAVE if supported.
@@ -53,8 +55,9 @@ public:
     uintptr_t next_user_stack_top;
     bool scheduler_cleanup_pending;
     Process* scheduler_next_pending;
-
-    // TODO: Zircon-style Handle Table for Capabilities
+    KernelHandleTable handles;
+    VmRegionTable vm_regions;
+    uintptr_t next_mmap_address;
 };
 
 

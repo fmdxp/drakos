@@ -85,7 +85,7 @@ LDFLAGS	=	-T linker.ld -nostdlib
 
 ## Targets ##
 
-.PHONY: all clean run debug images test-initcalls test-font test-pmm test-vmm test-heap qemu-test-address-space
+.PHONY: all clean run debug images test-initcalls test-font test-pmm test-vmm test-heap test-handles test-vm-regions test-ssm qemu-test-address-space
 
 all: $(ISO)
 
@@ -239,6 +239,13 @@ build/font_unicode_tests: tests/font_unicode_test.cpp include/font.hpp src/fonts
 test-font: build/font_unicode_tests
 	./build/font_unicode_tests src/fonts/Lat2-Terminus16.psf
 
+build/ssm_core_tests: tests/ssm_core_test.cpp userspace/ssm/service_manager.cpp userspace/ssm/service_manager.hpp
+	@mkdir -p $(BUILD)
+	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -Iuserspace/ssm tests/ssm_core_test.cpp userspace/ssm/service_manager.cpp -o $@
+
+test-ssm: build/ssm_core_tests
+	./build/ssm_core_tests
+
 build/pmm_tests: tests/pmm_test.cpp src/memory/pmm.cpp include/memory/pmm.hpp include/kernel/limine_requests.hpp
 	@mkdir -p $(BUILD)
 	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -DDRAKOS_HOST_TEST -Iinclude -Iinclude/memory -Iinclude/kernel $< src/memory/pmm.cpp -o $@
@@ -246,9 +253,9 @@ build/pmm_tests: tests/pmm_test.cpp src/memory/pmm.cpp include/memory/pmm.hpp in
 test-pmm: build/pmm_tests
 	./build/pmm_tests
 
-build/vmm_tests: tests/vmm_test.cpp src/memory/pmm.cpp src/memory/vmm.cpp include/memory/pmm.hpp include/memory/vmm.hpp include/kernel/limine_requests.hpp
+build/vmm_tests: tests/vmm_test.cpp tests/vm_region_test.cpp tests/page_cache_test.cpp src/kernel/vm_region.cpp src/kernel/handle.cpp src/fs/page_cache.cpp src/fs/vfs.cpp src/memory/pmm.cpp src/memory/vmm.cpp include/memory/pmm.hpp include/memory/vmm.hpp include/kernel/limine_requests.hpp include/kernel/vm_region.hpp include/fs/page_cache.hpp
 	@mkdir -p $(BUILD)
-	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -DDRAKOS_HOST_TEST -Iinclude -Iinclude/memory -Iinclude/kernel $< src/memory/pmm.cpp src/memory/vmm.cpp -o $@
+	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -pthread -DDRAKOS_HOST_TEST -Iinclude -Iinclude/memory -Iinclude/kernel -Iinclude/fs -Iinclude/drivers $< tests/vm_region_test.cpp tests/page_cache_test.cpp src/kernel/vm_region.cpp src/kernel/handle.cpp src/fs/page_cache.cpp src/fs/vfs.cpp src/memory/pmm.cpp src/memory/vmm.cpp -o $@
 
 test-vmm: build/vmm_tests
 	./build/vmm_tests
@@ -259,3 +266,12 @@ build/heap_tests: tests/heap_test.cpp src/memory/heap.cpp include/memory/heap.hp
 
 test-heap: build/heap_tests
 	./build/heap_tests
+
+build/vfs_handle_tests: tests/vfs_handle_test.cpp src/kernel/handle.cpp src/fs/vfs.cpp include/kernel/handle.hpp include/fs/vfs.hpp
+	@mkdir -p $(BUILD)
+	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -pthread -DDRAKOS_HOST_TEST -Iinclude -Iinclude/fs -Iinclude/kernel -Iinclude/drivers $< src/kernel/handle.cpp src/fs/vfs.cpp -o $@
+
+test-handles: build/vfs_handle_tests
+	./build/vfs_handle_tests
+
+test-vm-regions: test-vmm

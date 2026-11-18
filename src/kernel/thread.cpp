@@ -77,6 +77,7 @@ Process::Process() {
     next_user_stack_top = 0x00007FFFF0000000ULL;
     scheduler_cleanup_pending = false;
     scheduler_next_pending = nullptr;
+    next_mmap_address = 0x100000000ULL;
     // Default: use the kernel master PML4.
     // User processes will override this in the Thread constructor.
     page_table_phys = vmm_get_kernel_pml4();
@@ -92,6 +93,7 @@ bool Process::destroy() {
     if (result != VmmAddressSpaceResult::Success) return false;
     page_table_phys = vmm_get_kernel_pml4();
     is_user = false;
+    vm_regions.clear();
     return true;
 }
 
@@ -177,6 +179,15 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
         if (vmm_map_owned_page(parent_process->page_table_phys, user_stack_virt, user_stack_phys,
                                stack_flags) != VmmMapResult::Success) {
             pmm_free_page(user_stack_phys);
+            if (created_user_root) parent_process->destroy();
+            state = THREAD_DEAD;
+            return;
+        }
+        VmRegion stack_region{static_cast<uint8_t>(VM_PERM_READ | VM_PERM_WRITE),
+            VmRegionType::Stack, VmRegionSharing::Private, 0,
+            user_stack_virt, user_stack_virt + PAGE_SIZE, 0, nullptr};
+        if (parent_process->vm_regions.insert(stack_region) != VmRegionResult::Success) {
+            (void)vmm_unmap_page(parent_process->page_table_phys, user_stack_virt);
             if (created_user_root) parent_process->destroy();
             state = THREAD_DEAD;
             return;

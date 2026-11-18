@@ -2,6 +2,9 @@
 #include "memory/vmm.hpp"
 #include "kernel/limine_requests.hpp"
 #include "kernel/idt.hpp"
+#include "kernel/vm_region.hpp"
+#include "fs/vfs.hpp"
+#include "drivers/vga.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -12,7 +15,12 @@ volatile struct limine_hhdm_request g_hhdm_request = {};
 bool smp_tlb_invalidate_page(uintptr_t) { return true; }
 bool smp_tlb_flush_non_global() { return true; }
 bool smp_address_space_active(uintptr_t) { return false; }
+bool nx_enabled() { return false; }
 [[noreturn]] void panic(const char*, InterruptFrame*) { std::abort(); }
+bool run_vm_region_metadata_test();
+bool run_page_cache_test();
+VGA* g_vga = nullptr;
+void VGA::write(const char*) {}
 
 struct TestPageTable { uint64_t entries[512]; };
 static constexpr uintptr_t PHYS_BASE = 0x100000;
@@ -115,6 +123,8 @@ int main() {
 
     VMM vmm;
     bool ok = check(vmm.start(), "VMM creates a kernel page table over the fake PMM");
+    ok &= check(run_vm_region_metadata_test(), "region metadata and lifetime checks pass");
+    ok &= check(run_page_cache_test(), "page-cache host checks pass");
     uintptr_t kernel_root = vmm_get_kernel_pml4();
     uintptr_t phys = pmm_alloc_page();
     constexpr uintptr_t kernel_va = 0xFFFF900000001000ULL;
@@ -175,6 +185,41 @@ int main() {
                 "kernel-only page-table hierarchy stays supervisor-only");
     ok &= check(vmm_get_phys(kernel_va + offset) == phys + offset,
                 "process address space sees the shared kernel mapping");
+
+    VmRegionTable fault_regions;
+    constexpr uintptr_t anon_fault_va = 0x02000000;
+    VmRegion writable_region{VM_PERM_READ | VM_PERM_WRITE, VmRegionType::Anonymous,
+        VmRegionSharing::Private, 0, anon_fault_va, anon_fault_va + PAGE_SIZE, 0, nullptr};
+    ok &= check(fault_regions.insert(writable_region) == VmRegionResult::Success &&
+        fault_regions.resolve_anonymous_fault(process_root, anon_fault_va + 8, 0x6) ==
+            VmFaultResult::Resolved,
+        "anonymous write fault allocates and maps a writable user page");
+    VmmMappingInfo fault_mapping{};
+    ok &= check(vmm_query_mapping(anon_fault_va, &fault_mapping) &&
+        fault_mapping.ownership == VmmMappingInfo::Ownership::Owned &&
+        (fault_mapping.flags & (VMM_PRESENT | VMM_USER | VMM_WRITE)) ==
+            (VMM_PRESENT | VMM_USER | VMM_WRITE),
+        "demand-zero mapping records owned frame and requested permissions");
+    bool zeroed = true;
+    auto* anon_bytes = reinterpret_cast<const uint8_t*>(fault_mapping.physical_page + HHDM_OFFSET);
+    for (size_t i = 0; i < PAGE_SIZE; ++i) zeroed &= anon_bytes[i] == 0;
+    ok &= check(zeroed, "demand-zero pages contain no stale physical data");
+    ok &= check(vmm_unmap(anon_fault_va) == VmmUnmapResult::Success &&
+        fault_regions.remove(anon_fault_va, anon_fault_va + PAGE_SIZE) == VmRegionResult::Success,
+        "demand-zero mapping and region can both be removed");
+
+    VmRegion readonly_region{VM_PERM_READ, VmRegionType::Anonymous,
+        VmRegionSharing::Private, 0, anon_fault_va, anon_fault_va + PAGE_SIZE, 0, nullptr};
+    ok &= check(fault_regions.insert(readonly_region) == VmRegionResult::Success &&
+        fault_regions.resolve_anonymous_fault(process_root, anon_fault_va, 0x6) ==
+            VmFaultResult::ProtectionFault,
+        "write fault on read-only anonymous region is rejected");
+    ok &= check(vmm_query_mapping(anon_fault_va, &fault_mapping) &&
+        !(fault_mapping.flags & VMM_WRITE),
+        "read-only demand page is materialized without write permission");
+    ok &= check(vmm_unmap(anon_fault_va) == VmmUnmapResult::Success &&
+        fault_regions.remove(anon_fault_va, anon_fault_va + PAGE_SIZE) == VmRegionResult::Success,
+        "read-only fault test releases its mapping and region");
 
     vmm_unmap(user_va);
     ok &= check(vmm_get_phys(user_va) == 0, "unmap removes the current address-space mapping");

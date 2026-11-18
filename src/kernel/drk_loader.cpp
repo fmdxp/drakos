@@ -148,6 +148,19 @@ bool DrkLoader::loadExecutable() {
             uint64_t file_offset      = phdr.p_offset;
             uint64_t mem_pages        = (phdr.p_memsz + offset_in_page + PAGE_SIZE - 1) / PAGE_SIZE;
 
+            if (mem_pages) {
+                uint8_t permissions = VM_PERM_READ;
+                if (phdr.p_flags & PF_W) permissions |= VM_PERM_WRITE;
+                if (phdr.p_flags & PF_X) permissions |= VM_PERM_EXECUTE;
+                VmRegion load_region{permissions, VmRegionType::Anonymous,
+                    VmRegionSharing::Private, 0, static_cast<uintptr_t>(virt_base),
+                    static_cast<uintptr_t>(virt_base + mem_pages * PAGE_SIZE), 0, nullptr};
+                if (proc->vm_regions.insert(load_region) != VmRegionResult::Success) {
+                    cleanup_unqueued_thread();
+                    return false;
+                }
+            }
+
             uint64_t flags = VMM_PRESENT | VMM_USER;
             if (phdr.p_flags & PF_W) flags |= VMM_WRITE;
             if (!(phdr.p_flags & PF_X) && nx_enabled()) flags |= VMM_NX;

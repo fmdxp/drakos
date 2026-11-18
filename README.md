@@ -53,10 +53,10 @@ The Limine menu defaults to normal mode after three seconds. Select **drakos (ve
 
 For serial smoke testing, add `-display none -serial stdio -monitor none` to the QEMU command. The kernel idles after initialization, so stop QEMU with Ctrl-C when the expected boot output has appeared.
 
-Run the host-side initcall, font, PMM, VMM, and heap allocation checks with:
+Run the host-side initcall, font, PMM, VMM/VM-region/page-cache, heap, and file-handle checks with:
 
 ```bash
-make test-initcalls test-font test-pmm test-vmm test-heap
+make test-initcalls test-font test-pmm test-vmm test-vm-regions test-heap test-handles
 ```
 
 The framebuffer text renderer decodes UTF-8 and uses the bundled PSF1 font's Unicode table for supported glyphs; unsupported codepoints display as `?`.
@@ -73,7 +73,11 @@ Each user process receives a private lower-half address space and shares the sup
 
 The four-CPU QEMU runtime test checks concurrent kernel threads, concurrent ring 3 threads sharing one address space, concurrent threads in independent address spaces, syscall entry on APs, process teardown, address-space isolation, and TLB shootdowns. Run it with `make qemu-test-address-space`.
 
-The syscall layer currently supports anonymous private mappings only. `mprotect`, file-backed mappings, and a permission-controlled shared-memory API are not implemented. The VFS still uses a global descriptor table, releases its raw node on close, and has no retained file reference or page cache. The VM has no file-backed region or copy-on-write fault object, so exposing file mappings safely requires those foundations before syscall wiring. On CPUs without NX support, the kernel cannot enforce execute-disable permissions. These limits mean userspace isolation remains an early kernel boundary rather than a complete process security model.
+The syscall layer currently supports anonymous private mappings. Those mappings are tracked as process-scoped VM regions and allocate zero-filled pages on first access. `mprotect`, file-backed mapping syscalls, and a permission-controlled shared-memory API are not implemented. User file handles are process-scoped and generation-tagged; each handle retains a reference-counted `FileObject`, and in-flight operations retain their own reference so close cannot invalidate them. The kernel-side `vfs_*` descriptor API remains available for loader and driver code. A page cache now retains file objects and PMM-backed pages by stable file identity and page offset, shares cache entries across opens, updates cached pages after VFS writes, and reclaims unreferenced pages. File-backed VM fault resolution and Copy-on-Write are not implemented yet; file I/O is kept out of the page-fault interrupt path until the kernel has a safe deferred-I/O mechanism. On CPUs without NX support, the kernel cannot enforce execute-disable permissions. These limits mean userspace isolation remains an early kernel boundary rather than a complete process security model.
+
+### System Service Manager status
+
+The repository contains a host-testable userspace SSM policy core for version 1 service configuration parsing, deterministic dependency planning, required dependency failure gating, lifecycle transition validation, and bounded restart policy/backoff. Run `make test-ssm` to exercise it. The core is not yet a running service manager: the kernel does not expose userspace process creation, wait/exit-status collection, or process termination control, the normal boot path does not start an initial userspace process, and no userspace IPC/service-discovery facility exists. Therefore it cannot launch, monitor, restart, or shut down services, and no SSM QEMU runtime test is claimed. See [docs/system-service-manager.md](docs/system-service-manager.md) and [docs/roadmap.md](docs/roadmap.md) for the configuration and the incremental prerequisites.
 
 ## 🤝 Contribution
 

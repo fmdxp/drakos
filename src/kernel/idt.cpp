@@ -79,6 +79,15 @@ extern "C" void isr_handler(Context* ctx) {
         if (from_user) {
             uintptr_t fault_address = 0;
             if (ctx->int_no == 14) asm volatile("mov %%cr2, %0" : "=r"(fault_address));
+            if (ctx->int_no == 14) {
+                Thread* current = scheduler_get_current_thread();
+                if (current && current->parent_process) {
+                    VmFaultResult result = current->parent_process->vm_regions
+                        .resolve_anonymous_fault(current->parent_process->page_table_phys,
+                                                 fault_address, ctx->err_code);
+                    if (result == VmFaultResult::Resolved) return;
+                }
+            }
             bool expected_test_fault = address_space_runtime_record_fault(ctx->int_no, fault_address);
             // Don't crash the kernel! Kill the offending thread.
             if (g_vga && !expected_test_fault) {
