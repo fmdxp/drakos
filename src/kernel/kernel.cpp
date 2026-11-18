@@ -122,6 +122,8 @@ extern "C" [[noreturn]] void kernel_main(void)
     if (command_line_has_test(command_line)) run_address_space_runtime_test();
     scheduler_start_application_processors();
     if (command_line_has_test(command_line)) {
+        if (!run_process_exit_runtime_test())
+            panic("Process exit runtime test failed");
         if (!run_smp_kernel_scheduler_runtime_test())
             panic("SMP kernel scheduler runtime test failed");
         if (!run_smp_user_scheduler_runtime_test())

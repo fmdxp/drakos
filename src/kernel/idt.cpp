@@ -66,6 +66,7 @@ extern "C" void isr_32();
 extern "C" void isr_33();
 extern "C" void isr_40();
 extern "C" void isr_241();
+extern "C" void isr_239();
 
 // Global system tick counter
 volatile uint64_t g_system_ticks = 0;
@@ -144,6 +145,9 @@ extern "C" void isr_handler(Context* ctx) {
     } else if (ctx->int_no == 241) {
         smp_handle_ipi();
         lapic_eoi();
+    } else if (ctx->int_no == 239) {
+        // A reschedule IPI enters scheduler_switch from this frame.
+        lapic_eoi();
     } else {
         lapic_eoi();
     }
@@ -184,6 +188,7 @@ bool IDT::start() {
     set_entry(33, (uint64_t)isr_33, 0x8E);
     set_entry(40, (uint64_t)isr_40, 0x8E);
     set_entry(241, (uint64_t)isr_241, 0x8E);
+    set_entry(239, (uint64_t)isr_239, 0x8E);
 
     // TODO: Cleanly register all 256 from an array instead of manual externs
 

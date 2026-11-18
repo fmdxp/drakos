@@ -13,6 +13,8 @@
 
 static constexpr uint32_t SMP_MAX_CPUS = 256;
 static constexpr uint8_t SMP_IPI_VECTOR = 241;
+// Keep this below priority class F so it is masked during VMM shootdown waits.
+static constexpr uint8_t SMP_RESCHEDULE_VECTOR = 239;
 static constexpr uint64_t SMP_TIMEOUT_TICKS = 1000000000ULL;
 
 enum class SmpCommand : uint8_t { None, InvalidatePage, FlushNonGlobal, SwitchAddressSpace, ReadVirtual, StartScheduler, TestNoAck };
@@ -203,6 +205,14 @@ uint32_t smp_current_processor_index() {
 bool smp_processor_online(uint32_t processor_index) {
     return processor_index < s_cpu_count &&
            __atomic_load_n(&s_cpus[processor_index].online, __ATOMIC_ACQUIRE);
+}
+
+bool smp_request_reschedule(uint32_t processor_index) {
+    if (!s_initialized || processor_index >= s_cpu_count) return false;
+    SmpCpu& cpu = s_cpus[processor_index];
+    if (!__atomic_load_n(&cpu.online, __ATOMIC_ACQUIRE)) return false;
+    if (processor_index == smp_current_processor_index()) return true;
+    return lapic_send_ipi(cpu.lapic_id, SMP_RESCHEDULE_VECTOR);
 }
 
 void smp_set_kernel_stack(uintptr_t stack) {

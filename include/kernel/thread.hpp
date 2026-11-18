@@ -58,6 +58,13 @@ enum class ProcessResult : uint8_t {
     CleanupFailure,
 };
 
+enum class ProcessExitRequestResult : uint8_t {
+    Success,
+    AlreadyTerminating,
+    InvalidThread,
+    InvalidProcess,
+};
+
 class Process {
 public:
     Process();
@@ -69,6 +76,8 @@ public:
     bool transition_to(ProcessState next);
     ProcessResult finalize_termination();
     uint32_t reference_count() const;
+    int32_t exit_status() const;
+    bool has_explicit_exit_status() const;
 
     // Process ID
     uint64_t pid;
@@ -96,10 +105,13 @@ private:
     bool owns_address_space;
     volatile uint32_t references;
     volatile uint8_t lifecycle_state;
+    volatile int32_t stored_exit_status;
+    volatile bool explicit_exit_status;
 
     ProcessResult destroy_resources();
     static bool valid_transition(ProcessState from, ProcessState to);
     friend struct ProcessLifecycleTestAccess;
+    friend ProcessExitRequestResult scheduler_exit_current_process(int32_t status);
 };
 
 
@@ -189,6 +201,7 @@ extern "C" void scheduler_finish_switch();
 void scheduler_block_current_thread();
 void scheduler_wake_thread(Thread* t);
 void scheduler_terminate_thread(Thread* t);
+ProcessExitRequestResult scheduler_exit_current_process(int32_t status);
 void scheduler_yield();
 Thread* scheduler_get_current_thread();
 uint32_t scheduler_count_running_process_cpus(const Process* process);

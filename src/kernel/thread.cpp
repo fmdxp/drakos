@@ -588,6 +588,59 @@ void scheduler_terminate_thread(Thread* t) {
     scheduler_unlock(flags);
 }
 
+ProcessExitRequestResult scheduler_exit_current_process(int32_t status) {
+    bool reschedule[SCHEDULER_MAX_CPUS] = {};
+    uint32_t current_cpu = smp_current_processor_index();
+    uint64_t flags = scheduler_lock();
+    CpuSchedulerState* cpu = current_cpu_state();
+    Thread* caller = cpu ? cpu->current : nullptr;
+    Process* process = caller ? caller->parent_process : nullptr;
+    if (!caller || !caller->scheduler_enrolled) {
+        scheduler_unlock(flags);
+        return ProcessExitRequestResult::InvalidThread;
+    }
+    if (!process || !process->is_user) {
+        scheduler_unlock(flags);
+        return ProcessExitRequestResult::InvalidProcess;
+    }
+
+    ProcessState state = process->state();
+    bool first_request = state == ProcessState::Ready || state == ProcessState::Running;
+    if (first_request) {
+        // The scheduler lock serializes competing exits with thread selection
+        // and publication. Store status before exposing Terminating.
+        __atomic_store_n(&process->stored_exit_status, status, __ATOMIC_RELAXED);
+        __atomic_store_n(&process->explicit_exit_status, true, __ATOMIC_RELEASE);
+        if (!process->transition_to(ProcessState::Terminating)) {
+            scheduler_unlock(flags);
+            return ProcessExitRequestResult::InvalidProcess;
+        }
+    } else if (state != ProcessState::Terminating) {
+        scheduler_unlock(flags);
+        return ProcessExitRequestResult::InvalidProcess;
+    }
+
+    for (Thread* thread = s_run_queue, *first = s_run_queue;
+         thread; thread = thread->next) {
+        if (thread->parent_process == process) thread->state = THREAD_DEAD;
+        if (!thread->next || thread->next == first) break;
+    }
+    for (uint32_t index = 0; index < SCHEDULER_MAX_CPUS; ++index) {
+        CpuSchedulerState& target = s_cpu_scheduler[index];
+        if (index != current_cpu && target.enabled && target.current &&
+            target.current->parent_process == process)
+            reschedule[index] = true;
+    }
+    scheduler_unlock(flags);
+
+    for (uint32_t index = 0; index < SCHEDULER_MAX_CPUS; ++index) {
+        if (reschedule[index] && !smp_request_reschedule(index))
+            panic("Unable to reschedule a CPU running an exiting process");
+    }
+    return first_request ? ProcessExitRequestResult::Success
+                         : ProcessExitRequestResult::AlreadyTerminating;
+}
+
 Thread* scheduler_get_current_thread() {
     CpuSchedulerState* cpu = current_cpu_state();
     return cpu ? cpu->current : nullptr;

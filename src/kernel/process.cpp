@@ -21,7 +21,8 @@ Process::Process()
       scheduler_cleanup_pending(false), scheduler_next_pending(nullptr),
       handles(), vm_regions(), next_mmap_address(0x100000000ULL),
       owns_address_space(false), references(1),
-      lifecycle_state(static_cast<uint8_t>(ProcessState::Ready)) {
+      lifecycle_state(static_cast<uint8_t>(ProcessState::Ready)), stored_exit_status(0),
+      explicit_exit_status(false) {
 }
 
 Process::Process(UserProcessTag)
@@ -30,7 +31,8 @@ Process::Process(UserProcessTag)
       scheduler_cleanup_pending(false), scheduler_next_pending(nullptr),
       handles(), vm_regions(), next_mmap_address(0x100000000ULL),
       owns_address_space(false), references(1),
-      lifecycle_state(static_cast<uint8_t>(ProcessState::Created)) {
+      lifecycle_state(static_cast<uint8_t>(ProcessState::Created)), stored_exit_status(0),
+      explicit_exit_status(false) {
 }
 
 Process::~Process() {
@@ -136,6 +138,14 @@ bool Process::retain() {
 
 uint32_t Process::reference_count() const {
     return __atomic_load_n(&references, __ATOMIC_ACQUIRE);
+}
+
+int32_t Process::exit_status() const {
+    return __atomic_load_n(&stored_exit_status, __ATOMIC_ACQUIRE);
+}
+
+bool Process::has_explicit_exit_status() const {
+    return __atomic_load_n(&explicit_exit_status, __ATOMIC_ACQUIRE);
 }
 
 ProcessResult Process::destroy_resources() {

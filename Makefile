@@ -194,12 +194,17 @@ qemu-test-address-space: $(ISO)
 	sed 's/cmdline: drakos.mode=normal/cmdline: drakos.mode=verbose drakos.test=address-space/' limine.conf > "$$test_root/root/limine.conf"; \
 	xorriso -as mkisofs -R -r -J -V DRAKOS-AS-TEST --efi-boot limine-uefi-cd.bin -efi-boot-part --efi-boot-image "$$test_root/root" -o "$$test_root/test.iso" >/dev/null 2>&1; \
 	truncate -s 32M "$$test_root/disk.img"; \
-	set +e; timeout 20s qemu-system-x86_64 -cpu max -smp 4 -bios /usr/share/ovmf/OVMF.fd -cdrom "$$test_root/test.iso" -m 256M -display none -serial "file:$$test_root/serial.log" -monitor none -no-reboot -device ahci,id=ahci -drive "file=$$test_root/disk.img,format=raw,if=none,id=disk" -device ide-hd,bus=ahci.0,drive=disk; qemu_status=$$?; set -e; \
+	set +e; timeout 25s qemu-system-x86_64 -cpu max -smp 4 -bios /usr/share/ovmf/OVMF.fd -cdrom "$$test_root/test.iso" -m 256M -display none -serial "file:$$test_root/serial.log" -monitor none -no-reboot -device ahci,id=ahci -drive "file=$$test_root/disk.img,format=raw,if=none,id=disk" -device ide-hd,bus=ahci.0,drive=disk; qemu_status=$$?; set -e; \
 	if [ "$$qemu_status" -ne 124 ]; then cat "$$test_root/serial.log"; echo "QEMU exited unexpectedly: $$qemu_status"; exit 1; fi; \
 	cat "$$test_root/serial.log"; \
 	grep -q 'initial user thread ring3 execution: PASS' "$$test_root/serial.log"; \
 	grep -q 'user launch thread retirement: PASS' "$$test_root/serial.log"; \
 	grep -q 'user launch arguments and environment: PASS' "$$test_root/serial.log"; \
+	grep -q 'process exit status zero: PASS' "$$test_root/serial.log"; \
+	grep -q 'process-wide concurrent SMP exit: PASS' "$$test_root/serial.log"; \
+	grep -q 'unrelated process continued after exit: PASS' "$$test_root/serial.log"; \
+	grep -q 'implicit process exit status defaults to zero: PASS' "$$test_root/serial.log"; \
+	grep -q 'process exit semantics: PASS' "$$test_root/serial.log"; \
 	test "$$(grep -c 'user launch rollback stage: PASS' "$$test_root/serial.log")" -eq 6; \
 	grep -q 'address-space test: PASS' "$$test_root/serial.log"; \
 	grep -q 'SMP scheduler CPU initialization: PASS' "$$test_root/serial.log"; \

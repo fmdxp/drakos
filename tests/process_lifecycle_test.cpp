@@ -26,6 +26,8 @@ bool run_process_lifecycle_test() {
     uintptr_t root = process->page_table_phys;
     uint64_t process_id = process->pid;
     ok &= process->state() == ProcessState::Ready;
+    ok &= process->exit_status() == 0 && !process->has_explicit_exit_status();
+    ok &= process->exit_status() == 0 && !process->has_explicit_exit_status();
     ok &= process->reference_count() == 1;
     ok &= process->scheduler_threads == 0;
     ok &= vmm_retain_address_space(root) == VmmAddressSpaceResult::Success;
@@ -52,6 +54,8 @@ bool run_process_lifecycle_test() {
         ok &= !terminal->transition_to(ProcessState::Running);
         ok &= terminal->finalize_termination() == ProcessResult::Success;
         ok &= terminal->state() == ProcessState::Exited;
+        ok &= terminal->exit_status() == 0 && !terminal->has_explicit_exit_status();
+        ok &= terminal->exit_status() == 0 && !terminal->has_explicit_exit_status();
         ok &= vmm_retain_address_space(terminal_root) == VmmAddressSpaceResult::InvalidAddressSpace;
         ok &= terminal->release() == ProcessResult::Success;
         ok &= terminal->state() == ProcessState::Exited;

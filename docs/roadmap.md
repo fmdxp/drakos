@@ -21,7 +21,12 @@ It does not imply that listed future capabilities already work.
   System V AMD64 initial stack; libc startup passes `(argc, argv, envp)` to
   `main`; host and QEMU tests check the values. See
   [user-process-launch.md](user-process-launch.md).
-- **Milestones 5–9 not started:** exit and wait/reap semantics,
+- **Milestone 5 complete:** `exit` preserves a process status, terminates all
+  process threads across CPUs, and defers resource cleanup until no thread can
+  use the address space. Four-CPU QEMU tests cover concurrent exit, status
+  defaults, and unrelated-process progress. See
+  [process-lifecycle.md](process-lifecycle.md).
+- **Milestones 6–9 not started:** wait/reap semantics,
   parent-child management, initial userspace
   boot, SSM runtime integration, and later launch features remain unimplemented.
 

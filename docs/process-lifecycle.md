@@ -2,10 +2,9 @@
 
 ## Scope
 
-This is the kernel-side process creation foundation. It creates an empty user
-process and its address space without creating a thread. It does not load an
-ELF image, launch a process from userspace, add a syscall, collect exit status,
-wait/reap, terminate all threads, or model parent-child relationships.
+This documents user-process creation, execution, and process-wide exit. It does
+not provide wait/reap, parent-child relationships, external process termination,
+or userspace spawning.
 
 ## Lifecycle
 
@@ -23,7 +22,8 @@ Created -> Initializing -> Ready -> Running -> Terminating -> Exited
 - **Ready:** process metadata and its owned user address space are initialized.
   A Ready process can exist with zero threads.
 - **Running:** the scheduler has selected one of its threads.
-- **Terminating:** its final enrolled thread has been retired, or its final
+- **Terminating:** an explicit userspace exit has requested process-wide
+  termination, its final enrolled thread has been retired, or its final
   external reference is being released while it is still empty and Ready.
 - **Exited:** owned address space, handles, and VM-region metadata have been
   cleaned. The process object can remain alive while references remain.
@@ -31,6 +31,31 @@ Created -> Initializing -> Ready -> Running -> Terminating -> Exited
 There is no Reaped state or process registry yet. Exited is terminal; wait and
 reap semantics belong to a later milestone. Kernel worker processes use the
 kernel address space as a borrowed root and start Ready.
+
+## Process exit
+
+The `exit` syscall stores its low 32-bit argument as a signed `int32_t` process
+exit status. The first exit request wins if multiple threads call `exit`
+concurrently. Processes terminated without an explicit status retain the
+default status `0`; `has_explicit_exit_status()` distinguishes that default
+from an explicitly supplied zero. The status remains available while the
+Exited Process object is retained.
+
+The scheduler serializes process exit with thread publication and selection
+under its run-queue lock. It changes Ready/Running to Terminating, marks every
+enrolled thread in that process dead, and prevents future publication into the
+terminating process. It sends reschedule IPIs to other CPUs currently running
+its threads. Threads already inside a syscall are stopped before returning to
+userspace by the syscall return check; a thread already in userspace is
+preempted by its reschedule IPI. Other processes continue to schedule.
+
+The final retired thread queues deferred process cleanup. Only after no thread
+can be running in the address space does the scheduler destroy process-owned
+address-space resources, close handles, clear VM-region metadata, transition
+Terminating to Exited, and release its cleanup reference. Thread objects and
+the Process remain protected by their existing references until deferred
+reclamation finishes. No parent notification or status collection syscall is
+provided yet.
 
 ## Creation transaction
 
@@ -101,8 +126,8 @@ allocation failure. The existing four-CPU QEMU tests continue to exercise
 synthetic user threads, address-space isolation, deferred cleanup, and SMP
 scheduling; they do not load ELF processes.
 
-The Process record has no retained exit status, waitable parent relationship,
+The Process record retains exit status but has no waitable parent relationship,
 PID lookup/registry, or reaping API. Direct `scheduler_terminate_thread` still
-terminates one thread only. Dynamic ELF loading, command-line/environment
-construction, userspace spawn, whole-process termination, and SSM integration
-remain later milestones.
+terminates one thread only; the userspace `exit` syscall is process-wide.
+Dynamic ELF loading, command-line/environment construction, userspace spawn,
+and SSM integration remain later milestones.

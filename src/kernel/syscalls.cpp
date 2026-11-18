@@ -353,12 +353,17 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
             }
             break;
 
-        case 60: // exit (status)
-            if (scheduler_get_current_thread()) {
-                scheduler_terminate_thread(scheduler_get_current_thread());
-                scheduler_yield(); // Will never return here
+        case 60: { // exit (status)
+            ProcessExitRequestResult result = scheduler_exit_current_process(
+                static_cast<int32_t>(static_cast<uint32_t>(frame->rdi)));
+            if (result == ProcessExitRequestResult::Success ||
+                result == ProcessExitRequestResult::AlreadyTerminating) {
+                scheduler_yield();
+                panic("Process exit syscall returned to an exiting thread");
             }
+            ret = -EPERM;
             break;
+        }
 
         case 63: { // uname
             char* buf = (char*)frame->rdi;
@@ -442,5 +447,13 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
             break;
     }
     
+    Thread* current = scheduler_get_current_thread();
+    if (current && current->parent_process && current->parent_process->is_user &&
+        (current->parent_process->state() == ProcessState::Terminating ||
+         current->parent_process->state() == ProcessState::Exited)) {
+        scheduler_terminate_thread(current);
+        scheduler_yield();
+        panic("Terminating process thread returned from a syscall");
+    }
     frame->num = (uint64_t)ret;
 }

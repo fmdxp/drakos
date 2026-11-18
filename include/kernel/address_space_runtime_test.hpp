@@ -1,6 +1,7 @@
 #pragma once
 
 bool run_address_space_runtime_test();
+bool run_process_exit_runtime_test();
 bool run_smp_user_scheduler_runtime_test();
 bool run_smp_kernel_scheduler_runtime_test();
 bool run_smp_independent_user_runtime_test();

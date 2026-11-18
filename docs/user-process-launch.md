@@ -69,5 +69,6 @@ publication.
   intentionally bounded. Auxiliary-vector data currently contains only
   `AT_NULL`.
 - The test program terminates through the existing fault-retirement test path;
-  normal process exit semantics remain future work.
+  process exit is provided by the `exit` syscall and is documented in
+  [process-lifecycle.md](process-lifecycle.md).
 - ELF format limits are documented in [elf-loading.md](elf-loading.md).
