@@ -12,7 +12,12 @@ It does not imply that listed future capabilities already work.
 - **Milestone 2 complete:** reusable ELF64 `ET_EXEC` validation and loading
   into a caller-owned address space is implemented and host-tested. The loader
   does not create processes or threads; see [elf-loading.md](elf-loading.md).
-- **Milestones 3–9 not started:** process spawning, arguments and environment,
+- **Milestone 3 complete:** `user_process_create_from_elf` prepares a process,
+  image, initial ABI stack, and ring-3 thread before scheduler publication.
+  QEMU verifies user instructions, stack state, a `getpid` syscall, failure
+  rollback, and deferred cleanup; normal boot still starts no user process.
+  See [user-process-launch.md](user-process-launch.md).
+- **Milestones 4–9 not started:** arguments and environment,
   exit and wait/reap semantics, parent-child management, initial userspace
   boot, SSM runtime integration, and later launch features remain unimplemented.
 

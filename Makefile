@@ -197,6 +197,9 @@ qemu-test-address-space: $(ISO)
 	set +e; timeout 20s qemu-system-x86_64 -cpu max -smp 4 -bios /usr/share/ovmf/OVMF.fd -cdrom "$$test_root/test.iso" -m 256M -display none -serial "file:$$test_root/serial.log" -monitor none -no-reboot -device ahci,id=ahci -drive "file=$$test_root/disk.img,format=raw,if=none,id=disk" -device ide-hd,bus=ahci.0,drive=disk; qemu_status=$$?; set -e; \
 	if [ "$$qemu_status" -ne 124 ]; then cat "$$test_root/serial.log"; echo "QEMU exited unexpectedly: $$qemu_status"; exit 1; fi; \
 	cat "$$test_root/serial.log"; \
+	grep -q 'initial user thread ring3 execution: PASS' "$$test_root/serial.log"; \
+	grep -q 'user launch thread retirement: PASS' "$$test_root/serial.log"; \
+	test "$$(grep -c 'user launch rollback stage: PASS' "$$test_root/serial.log")" -eq 6; \
 	grep -q 'address-space test: PASS' "$$test_root/serial.log"; \
 	grep -q 'SMP scheduler CPU initialization: PASS' "$$test_root/serial.log"; \
 	grep -q 'SMP concurrent kernel threads: PASS' "$$test_root/serial.log"; \

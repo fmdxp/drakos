@@ -48,11 +48,12 @@ static void make_threads_and_processes()
 {
     Process* usb_proc = new Process();
     if (usb_proc) {
-        g_usb_thread = new Thread(usb_proc, usb_thread_main, false, "USB Controller");
-        if (g_usb_thread && g_usb_thread->state != THREAD_DEAD)
-            scheduler_add_thread(g_usb_thread);
-        if (!g_usb_thread || !g_usb_thread->scheduler_enrolled) {
-            delete g_usb_thread;
+        Thread* thread = new Thread(usb_proc, usb_thread_main, false, "USB Controller");
+        if (thread && thread->initialization_result == ThreadInitResult::Success &&
+            scheduler_add_thread(thread) == SchedulerPublishResult::Success)
+            g_usb_thread = thread;
+        else {
+            delete thread;
             g_usb_thread = nullptr;
         }
         if (usb_proc->release() != ProcessResult::Success)
@@ -62,11 +63,12 @@ static void make_threads_and_processes()
 
     Process* gamepad_proc = new Process();
     if (gamepad_proc) {
-        g_gamepad_thread = new Thread(gamepad_proc, gamepad_thread_main, false, "Gamepad Debugger");
-        if (g_gamepad_thread && g_gamepad_thread->state != THREAD_DEAD)
-            scheduler_add_thread(g_gamepad_thread);
-        if (!g_gamepad_thread || !g_gamepad_thread->scheduler_enrolled) {
-            delete g_gamepad_thread;
+        Thread* thread = new Thread(gamepad_proc, gamepad_thread_main, false, "Gamepad Debugger");
+        if (thread && thread->initialization_result == ThreadInitResult::Success &&
+            scheduler_add_thread(thread) == SchedulerPublishResult::Success)
+            g_gamepad_thread = thread;
+        else {
+            delete thread;
             g_gamepad_thread = nullptr;
         }
         if (gamepad_proc->release() != ProcessResult::Success)

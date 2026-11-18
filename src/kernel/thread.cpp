@@ -45,6 +45,10 @@ static uint32_t s_runnable_count = 0;
 static Process* s_kernel_process = nullptr;
 static Process* s_pending_process_cleanup = nullptr;
 static volatile bool s_scheduler_lock = false;
+static volatile bool s_fail_next_scheduler_publication = false;
+static volatile bool s_fail_next_user_stack_allocation = false;
+static volatile bool s_fail_next_user_stack_mapping = false;
+static volatile bool s_fail_next_thread_initialization = false;
 
 static uint64_t scheduler_lock() {
     uint64_t flags;
@@ -79,6 +83,9 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
     last_cpu = UINT32_MAX;
     cpu_migrations = 0;
     state = THREAD_READY; // Ready
+    initialization_result = ThreadInitResult::Success;
+    stack_mapping_error = VmmMapResult::Success;
+    stack_region_error = VmRegionResult::Success;
     kernel_stack_base = 0;
     kernel_stack = 0;
     context = nullptr;
@@ -86,12 +93,19 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
     if (!parent_process || !parent_process->retain()) {
         parent_process = nullptr;
         state = THREAD_DEAD;
+        initialization_result = ThreadInitResult::InvalidProcess;
         return;
     }
     ProcessState process_state = parent_process->state();
     if ((process_state != ProcessState::Ready && process_state != ProcessState::Running) ||
         (is_user && (!parent_process->is_user || !parent_process->page_table_phys))) {
         state = THREAD_DEAD;
+        initialization_result = ThreadInitResult::InvalidProcess;
+        return;
+    }
+    if (is_user && !entry_point) {
+        state = THREAD_DEAD;
+        initialization_result = ThreadInitResult::InvalidEntryPoint;
         return;
     }
     
@@ -99,6 +113,7 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
     uint8_t* stack = new uint8_t[16384];
     if (!stack) {
         state = THREAD_DEAD;
+        initialization_result = ThreadInitResult::KernelStackOutOfMemory;
         return;
     }
     kernel_stack_base = reinterpret_cast<uintptr_t>(stack);
@@ -118,6 +133,12 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
     
     // Initialize FPU state to 0
     for (size_t i = 0; i < 4096; i++) fpu_state[i] = 0;
+
+    if (__atomic_exchange_n(&s_fail_next_thread_initialization, false, __ATOMIC_ACQ_REL)) {
+        state = THREAD_DEAD;
+        initialization_result = ThreadInitResult::InjectedFailure;
+        return;
+    }
     
     // Initialize the Interrupt Frame for IRETQ
     if (is_user) {
@@ -127,18 +148,24 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
         
         // Give this user process its own isolated address space
         // Reserve a unique one-page stack slot with a one-page unmapped gap.
-        uintptr_t user_stack_phys = pmm_alloc_page();
+        uintptr_t user_stack_phys = 0;
+        if (!__atomic_exchange_n(&s_fail_next_user_stack_allocation, false, __ATOMIC_ACQ_REL))
+            user_stack_phys = pmm_alloc_page();
         if (!user_stack_phys) {
             state = THREAD_DEAD;
+            initialization_result = ThreadInitResult::UserStackOutOfMemory;
             return;
         }
         uintptr_t user_stack_top = __atomic_load_n(&parent_process->next_user_stack_top,
                                                     __ATOMIC_RELAXED);
         uintptr_t next_stack_top = 0;
         for (;;) {
-            if (user_stack_top < 2 * PAGE_SIZE) {
+            constexpr uintptr_t USER_LIMIT = 1ULL << 47;
+            if ((user_stack_top & (PAGE_SIZE - 1)) || user_stack_top > USER_LIMIT ||
+                user_stack_top < 2 * PAGE_SIZE) {
                 pmm_free_page(user_stack_phys);
                 state = THREAD_DEAD;
+                initialization_result = ThreadInitResult::UserStackOutOfMemory;
                 return;
             }
             next_stack_top = user_stack_top - 2 * PAGE_SIZE;
@@ -148,26 +175,45 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
                 break;
         }
         uintptr_t user_stack_virt = user_stack_top - PAGE_SIZE;
+        auto* stack_bytes = reinterpret_cast<uint8_t*>(user_stack_phys + pmm_hhdm_offset());
+        for (size_t i = 0; i < PAGE_SIZE; ++i) stack_bytes[i] = 0;
         uint64_t stack_flags = VMM_PRESENT | VMM_WRITE | VMM_USER;
         if (nx_enabled()) stack_flags |= VMM_NX;
-        if (vmm_map_owned_page(parent_process->page_table_phys, user_stack_virt, user_stack_phys,
-                               stack_flags) != VmmMapResult::Success) {
+        if (__atomic_exchange_n(&s_fail_next_user_stack_mapping, false, __ATOMIC_ACQ_REL))
+            stack_mapping_error = VmmMapResult::PageTableOutOfMemory;
+        else
+            stack_mapping_error = vmm_map_owned_page(parent_process->page_table_phys,
+                user_stack_virt, user_stack_phys, stack_flags);
+        if (stack_mapping_error != VmmMapResult::Success) {
             pmm_free_page(user_stack_phys);
             state = THREAD_DEAD;
+            initialization_result = ThreadInitResult::UserStackMappingFailed;
             return;
         }
         VmRegion stack_region{static_cast<uint8_t>(VM_PERM_READ | VM_PERM_WRITE),
             VmRegionType::Stack, VmRegionSharing::Private, 0,
             user_stack_virt, user_stack_virt + PAGE_SIZE, 0, nullptr};
-        if (parent_process->vm_regions.insert(stack_region) != VmRegionResult::Success) {
+        stack_region_error = parent_process->vm_regions.insert(stack_region);
+        if (stack_region_error != VmRegionResult::Success) {
             if (vmm_unmap_page(parent_process->page_table_phys, user_stack_virt) !=
                 VmmUnmapResult::Success)
                 panic("Failed to roll back an unpublished user stack mapping");
             state = THREAD_DEAD;
+            initialization_result = ThreadInitResult::UserStackRegionFailed;
             return;
         }
-        
-        context->rsp = user_stack_top;
+
+        // Empty initial process stack: argc=0, argv=null, envp=null, AT_NULL=0.
+        uintptr_t initial_stack_pointer =
+            (user_stack_top - 5 * sizeof(uint64_t)) & ~static_cast<uintptr_t>(0xF);
+        auto* initial_words = reinterpret_cast<uint64_t*>(
+            stack_bytes + (initial_stack_pointer - user_stack_virt));
+        initial_words[0] = 0; // argc
+        initial_words[1] = 0; // argv terminator
+        initial_words[2] = 0; // envp terminator
+        initial_words[3] = 0; // AT_NULL
+        initial_words[4] = 0; // AT_NULL value
+        context->rsp = initial_stack_pointer;
     } else {
         context->cs = 0x08; // KERNEL_CS
         context->ss = 0x10; // KERNEL_SS
@@ -237,19 +283,37 @@ void scheduler_activate_current_processor() {
     if (cpu && cpu->current && cpu->idle) cpu->enabled = true;
 }
 
-void scheduler_add_thread(Thread* thread) {
-    if (!thread || thread->state == THREAD_DEAD || !thread->context ||
-        !thread->kernel_stack_base || thread->scheduler_enrolled) return;
+void thread_test_fail_next_user_stack_allocation() {
+    __atomic_store_n(&s_fail_next_user_stack_allocation, true, __ATOMIC_RELEASE);
+}
+
+void thread_test_fail_next_user_stack_mapping() {
+    __atomic_store_n(&s_fail_next_user_stack_mapping, true, __ATOMIC_RELEASE);
+}
+
+void thread_test_fail_next_initialization() {
+    __atomic_store_n(&s_fail_next_thread_initialization, true, __ATOMIC_RELEASE);
+}
+
+void scheduler_test_fail_next_publication() {
+    __atomic_store_n(&s_fail_next_scheduler_publication, true, __ATOMIC_RELEASE);
+}
+
+SchedulerPublishResult scheduler_add_thread(Thread* thread) {
+    if (!thread) return SchedulerPublishResult::InvalidThread;
+    if (thread->scheduler_enrolled) return SchedulerPublishResult::AlreadyPublished;
+    if (thread->state == THREAD_DEAD || !thread->context || !thread->kernel_stack_base)
+        return SchedulerPublishResult::InvalidThread;
+    if (__atomic_exchange_n(&s_fail_next_scheduler_publication, false, __ATOMIC_ACQ_REL))
+        return SchedulerPublishResult::InjectedFailure;
     Process* process = thread->parent_process;
     if (!process || (process->state() != ProcessState::Ready &&
                      process->state() != ProcessState::Running)) {
-        thread->state = THREAD_DEAD;
-        return;
+        return SchedulerPublishResult::InvalidProcess;
     }
     if (process->is_user) {
         if (vmm_retain_address_space(process->page_table_phys) != VmmAddressSpaceResult::Success) {
-            thread->state = THREAD_DEAD;
-            return;
+            return SchedulerPublishResult::AddressSpaceFailure;
         }
         thread->address_space_retained = true;
     }
@@ -259,11 +323,12 @@ void scheduler_add_thread(Thread* thread) {
         !s_run_queue) {
         scheduler_unlock(flags);
         if (thread->address_space_retained) {
-            vmm_release_address_space(process->page_table_phys);
+            if (vmm_release_address_space(process->page_table_phys) !=
+                VmmAddressSpaceResult::Success)
+                panic("Scheduler could not roll back a thread address-space reference");
             thread->address_space_retained = false;
         }
-        thread->state = THREAD_DEAD;
-        return;
+        return SchedulerPublishResult::SchedulerUnavailable;
     }
     Thread* tail = s_run_cursor ? s_run_cursor : s_run_queue;
     thread->next = tail->next;
@@ -273,6 +338,7 @@ void scheduler_add_thread(Thread* thread) {
     thread->scheduler_enrolled = true;
     if (process) ++process->scheduler_threads;
     scheduler_unlock(flags);
+    return SchedulerPublishResult::Success;
 }
 
 // Low-level XSAVE / XRSTOR wrappers

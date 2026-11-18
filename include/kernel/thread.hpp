@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include "kernel/handle.hpp"
 #include "kernel/vm_region.hpp"
+#include "memory/vmm.hpp"
 
 // Avx/Fpu State Size (2688 for AVX512, 512 for standard FXSAVE)
 // We allocate enough space to safely use XSAVE if supported.
@@ -110,6 +111,27 @@ enum ThreadState {
     THREAD_DEAD,        // Thread is killed or ended its execution, and it's waiting to be freed up
 };
 
+enum class ThreadInitResult : uint8_t {
+    Success,
+    InvalidProcess,
+    InvalidEntryPoint,
+    KernelStackOutOfMemory,
+    UserStackOutOfMemory,
+    UserStackMappingFailed,
+    UserStackRegionFailed,
+    InjectedFailure,
+};
+
+enum class SchedulerPublishResult : uint8_t {
+    Success,
+    InvalidThread,
+    InvalidProcess,
+    AddressSpaceFailure,
+    SchedulerUnavailable,
+    AlreadyPublished,
+    InjectedFailure,
+};
+
 
 
 class Thread {
@@ -135,6 +157,9 @@ public:
 
     // Thread state (e.g., Ready, Running, Blocked)
     ThreadState state;
+    ThreadInitResult initialization_result;
+    VmmMapResult stack_mapping_error;
+    VmRegionResult stack_region_error;
     bool address_space_retained;
     bool scheduler_enrolled;
     bool process_final_thread;
@@ -149,7 +174,11 @@ public:
 void scheduler_init();
 void scheduler_start_application_processors();
 void scheduler_activate_current_processor();
-void scheduler_add_thread(Thread* thread);
+SchedulerPublishResult scheduler_add_thread(Thread* thread);
+void scheduler_test_fail_next_publication();
+void thread_test_fail_next_user_stack_allocation();
+void thread_test_fail_next_user_stack_mapping();
+void thread_test_fail_next_initialization();
 extern "C" Context* scheduler_switch(Context* current_context);
 extern "C" void scheduler_finish_switch();
 void scheduler_block_current_thread();

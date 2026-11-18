@@ -10,9 +10,9 @@ It does not start or supervise processes. No kernel policy has been added.
 
 The runtime blockers found during the architecture review are:
 
-- The syscall interface has no userspace process spawn or exec operation. The
-  reusable ELF image loader is a kernel-side operation and is not a userspace
-  API.
+- The syscall interface has no userspace process spawn or exec operation. A
+  kernel-side API can now prepare an ELF process and publish its first user
+  thread, but the normal boot path and userspace cannot invoke it.
 - The normal boot path does not create an initial userspace process. The
   ELF loader is not connected to process or thread creation.
 - Process termination does not preserve an exit status for a parent to collect;

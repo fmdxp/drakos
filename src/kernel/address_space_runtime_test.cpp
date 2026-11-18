@@ -1,4 +1,8 @@
 #include "kernel/address_space_runtime_test.hpp"
+#include "kernel/elf.hpp"
+#include "kernel/user_process.hpp"
+#include "kernel/panic.hpp"
+#include "fs/vfs.hpp"
 
 #include "kernel/boot_diagnostics.hpp"
 #include "kernel/thread.hpp"
@@ -13,9 +17,103 @@ static volatile bool s_user_fault_matched = false;
 static volatile bool s_user_fault_mapping_found = false;
 static volatile uint64_t s_user_fault_mapping_flags = 0;
 static volatile bool s_user_fault_mapping_owned = false;
+static volatile bool s_expect_user_launch = false;
+static volatile bool s_user_launch_seen = false;
+static volatile bool s_user_launch_matched = false;
+static volatile bool s_user_launch_vector_ok = false;
+static volatile bool s_user_launch_cpl_ok = false;
+static volatile bool s_user_launch_ip_ok = false;
+static volatile bool s_user_launch_offset_ok = false;
+static volatile bool s_user_launch_stack_ok = false;
+static volatile bool s_user_launch_owner_ok = false;
+static volatile bool s_user_launch_marker_ok = false;
+static volatile uint64_t s_user_launch_actual_vector = 0;
+static volatile uintptr_t s_user_launch_actual_ip = 0;
 static uintptr_t s_expected_fault_address = 0;
 static uint64_t s_expected_fault_vector = 0;
+static Process* s_expected_launch_process = nullptr;
+static uintptr_t s_expected_launch_entry = 0;
+static uintptr_t s_expected_launch_fault_ip = 0;
+static uintptr_t s_expected_launch_stack = 0;
+static uintptr_t s_expected_launch_marker = 0;
+static uint64_t s_expected_launch_pid = 0;
 static uint64_t s_smp_kernel_counter = 0;
+
+static void diagnostic_write_u64(const char* prefix, uint64_t value) {
+    char digits[21];
+    size_t count = 0;
+    do {
+        digits[count++] = static_cast<char>('0' + value % 10);
+        value /= 10;
+    } while (value && count < sizeof(digits));
+    boot_diagnostics_write(prefix);
+    while (count) {
+        char character[2] = {digits[--count], 0};
+        boot_diagnostics_write(character);
+    }
+    boot_diagnostics_write("\n");
+}
+
+class RuntimeElfFileSystem final : public VFS::FileSystem {
+public:
+    uint8_t image[0x3000]{};
+
+    VFS::Node* lookup(const char*) override { return nullptr; }
+    VFS::Node* create(const char*, bool) override { return nullptr; }
+    int read(VFS::Node*, void* output, uint32_t offset, uint32_t size) override {
+        if (!output || offset >= sizeof(image)) return 0;
+        if (size > sizeof(image) - offset) size = sizeof(image) - offset;
+        auto* bytes = static_cast<uint8_t*>(output);
+        for (uint32_t i = 0; i < size; ++i) bytes[i] = image[offset + i];
+        return static_cast<int>(size);
+    }
+    int write(VFS::Node*, const void*, uint32_t, uint32_t) override { return -1; }
+    bool listdir(VFS::Node*, VFS::DirEntry*, uint32_t, uint32_t& count) override {
+        count = 0;
+        return true;
+    }
+    void release(VFS::Node* node) override { delete node; }
+
+    void reset_image() {
+        for (size_t i = 0; i < sizeof(image); ++i) image[i] = 0;
+        auto* header = reinterpret_cast<Elf64_Ehdr*>(image);
+        header->e_ident[0] = 0x7F;
+        header->e_ident[1] = 'E';
+        header->e_ident[2] = 'L';
+        header->e_ident[3] = 'F';
+        header->e_ident[EI_CLASS] = ELFCLASS64;
+        header->e_ident[EI_DATA] = ELFDATA2LSB;
+        header->e_ident[EI_VERSION] = EV_CURRENT;
+        header->e_type = ET_EXEC;
+        header->e_machine = EM_X86_64;
+        header->e_version = EV_CURRENT;
+        header->e_entry = 0x00400000;
+        header->e_phoff = sizeof(Elf64_Ehdr);
+        header->e_ehsize = sizeof(Elf64_Ehdr);
+        header->e_phentsize = sizeof(Elf64_Phdr);
+        header->e_phnum = 2;
+        auto* programs = reinterpret_cast<Elf64_Phdr*>(image + sizeof(Elf64_Ehdr));
+        programs[0] = {PT_LOAD, PF_R | PF_X, 0x1000, 0x00400000, 0, 38, PAGE_SIZE, PAGE_SIZE};
+        programs[1] = {PT_LOAD, PF_R | PF_W, 0x2000, 0x00500000, 0, 8, PAGE_SIZE, PAGE_SIZE};
+
+        // Read argc=0 at the initial RSP, save RSP, call getpid through
+        // SYSCALL, save RAX, then execute UD2 for controlled CPL3 observation.
+        const uint8_t user_code[] = {
+            0x48, 0x89, 0xE0,                   // mov %rsp,%rax
+            0x48, 0x83, 0x3C, 0x24, 0x00,       // cmpq $0,(%rsp)
+            0x75, 0x1A,                         // jne bad_stack
+            0x48, 0xBB, 0x00, 0x00, 0x50, 0x00,
+            0x00, 0x00, 0x00, 0x00,             // movabs $0x500000,%rbx
+            0x48, 0x89, 0x03,                   // mov %rax,(%rbx)
+            0xB8, 0x27, 0x00, 0x00, 0x00,       // mov $39,%eax (getpid)
+            0x0F, 0x05,                         // syscall
+            0x48, 0x89, 0x43, 0x08,             // mov %rax,8(%rbx)
+            0x0F, 0x0B,                         // ud2
+            0x0F, 0x0B                          // bad_stack: ud2
+        };
+        for (size_t i = 0; i < sizeof(user_code); ++i) image[0x1000 + i] = user_code[i];
+    }
+};
 
 static void smp_kernel_counter_thread() {
     for (;;) __atomic_add_fetch(&s_smp_kernel_counter, 1, __ATOMIC_RELAXED);
@@ -54,7 +152,67 @@ void address_space_runtime_expect_fault(uintptr_t fault_address, uint64_t vector
     s_expect_user_fault = true;
 }
 
-bool address_space_runtime_record_fault(uint64_t vector, uintptr_t fault_address) {
+void address_space_runtime_expect_user_launch(Process* process, uintptr_t entry_point,
+                                              uintptr_t fault_ip,
+                                              uintptr_t stack_pointer,
+                                              uintptr_t marker_address) {
+    s_expected_launch_process = process;
+    s_expected_launch_entry = entry_point;
+    s_expected_launch_fault_ip = fault_ip;
+    s_expected_launch_stack = stack_pointer;
+    s_expected_launch_marker = marker_address;
+    s_expected_launch_pid = process ? process->pid : 0;
+    s_user_launch_seen = false;
+    s_user_launch_matched = false;
+    s_user_launch_vector_ok = false;
+    s_user_launch_cpl_ok = false;
+    s_user_launch_ip_ok = false;
+    s_user_launch_offset_ok = false;
+    s_user_launch_stack_ok = false;
+    s_user_launch_owner_ok = false;
+    s_user_launch_marker_ok = false;
+    __atomic_store_n(&s_expect_user_launch, true, __ATOMIC_RELEASE);
+}
+
+bool address_space_runtime_user_launch_seen() { return s_user_launch_seen; }
+bool address_space_runtime_user_launch_matched() { return s_user_launch_matched; }
+
+bool address_space_runtime_record_fault(uint64_t vector, uintptr_t fault_address,
+                                        const Context* context) {
+    if (__atomic_load_n(&s_expect_user_launch, __ATOMIC_ACQUIRE)) {
+        s_user_launch_seen = true;
+        s_user_launch_actual_vector = vector;
+        s_user_launch_actual_ip = context ? context->rip : 0;
+        Thread* current = scheduler_get_current_thread();
+        s_user_launch_vector_ok = vector == 6;
+        s_user_launch_cpl_ok = context && (context->cs & 3) == 3;
+        s_user_launch_ip_ok = context && context->rip == s_expected_launch_fault_ip;
+        s_user_launch_offset_ok = context && context->rip >= s_expected_launch_entry &&
+            context->rip - s_expected_launch_entry == 34;
+        s_user_launch_stack_ok = context && context->rsp == s_expected_launch_stack;
+        s_user_launch_owner_ok = current &&
+            current->parent_process == s_expected_launch_process &&
+            current->parent_process->is_user &&
+            current->parent_process->page_table_phys != vmm_get_kernel_pml4();
+        VmmMappingInfo marker_mapping{};
+        bool marker_mapped = vmm_query_mapping(s_expected_launch_marker, &marker_mapping) &&
+            (marker_mapping.flags & (VMM_PRESENT | VMM_USER | VMM_WRITE)) ==
+                (VMM_PRESENT | VMM_USER | VMM_WRITE);
+        s_user_launch_marker_ok = marker_mapped;
+        if (marker_mapped) {
+            auto* saved_stack = reinterpret_cast<volatile uint64_t*>(
+                marker_mapping.physical_page + pmm_hhdm_offset());
+            auto* saved_pid = reinterpret_cast<volatile uint64_t*>(
+                reinterpret_cast<volatile uint8_t*>(saved_stack) + sizeof(uint64_t));
+            s_user_launch_marker_ok &= *saved_stack == s_expected_launch_stack &&
+                                       *saved_pid == s_expected_launch_pid;
+        }
+        s_user_launch_matched = s_user_launch_vector_ok && s_user_launch_cpl_ok &&
+            s_user_launch_ip_ok && s_user_launch_offset_ok &&
+            s_user_launch_stack_ok && s_user_launch_owner_ok && s_user_launch_marker_ok;
+        __atomic_store_n(&s_expect_user_launch, false, __ATOMIC_RELEASE);
+        return true;
+    }
     if (!s_expect_user_fault) return false;
     s_user_fault_seen = true;
     s_user_fault_matched = vector == s_expected_fault_vector &&
@@ -105,6 +263,114 @@ static bool run_empty_process_creation_test() {
     boot_diagnostics_write(passed ? "process empty-create teardown: PASS\n" :
                                     "process empty-create teardown: FAIL\n");
     return passed;
+}
+
+static UserProcessCreateResult attempt_initial_user_process(RuntimeElfFileSystem& fs,
+                                                             int failure_stage,
+                                                             UserProcessImage* output) {
+    auto* node = new VFS::Node{};
+    if (!node) return {};
+    node->type = VFS::NodeType::FILE;
+    node->size = sizeof(fs.image);
+    node->fs = &fs;
+    VFS::FileObject file(node, VFS_O_READ);
+    switch (failure_stage) {
+        case 1: user_process_test_fail_next_thread_allocation(); break;
+        case 2: thread_test_fail_next_user_stack_allocation(); break;
+        case 3: thread_test_fail_next_user_stack_mapping(); break;
+        case 4: thread_test_fail_next_initialization(); break;
+        case 5: scheduler_test_fail_next_publication(); break;
+        default: break;
+    }
+    return user_process_create_from_elf(file, 0, sizeof(fs.image), output);
+}
+
+static bool run_initial_user_thread_test() {
+    bool ok = true;
+    RuntimeElfFileSystem fs;
+    fs.reset_image();
+    const UserProcessCreateError expected_errors[] = {
+        UserProcessCreateError::ElfLoadFailed,
+        UserProcessCreateError::ThreadAllocationFailed,
+        UserProcessCreateError::ThreadInitializationFailed,
+        UserProcessCreateError::ThreadInitializationFailed,
+        UserProcessCreateError::ThreadInitializationFailed,
+        UserProcessCreateError::SchedulerPublicationFailed,
+    };
+    for (int failure_stage = 0; failure_stage <= 5; ++failure_stage) {
+        fs.reset_image();
+        if (failure_stage == 0)
+            reinterpret_cast<Elf64_Ehdr*>(fs.image)->e_ident[0] = 0;
+        UserProcessImage output{};
+        UserProcessCreateResult failed = attempt_initial_user_process(fs, failure_stage, &output);
+        bool correct = failed.error == expected_errors[failure_stage] && !output.process;
+        if (failure_stage == 2)
+            correct &= failed.thread_error == ThreadInitResult::UserStackOutOfMemory;
+        if (failure_stage == 3)
+            correct &= failed.thread_error == ThreadInitResult::UserStackMappingFailed &&
+                       failed.thread_mapping_error == VmmMapResult::PageTableOutOfMemory;
+        if (failure_stage == 4)
+            correct &= failed.thread_error == ThreadInitResult::InjectedFailure;
+        if (failure_stage == 5)
+            correct &= failed.scheduler_error == SchedulerPublishResult::InjectedFailure;
+        ok &= correct;
+        boot_diagnostics_write(correct ? "user launch rollback stage: PASS\n" :
+                                          "user launch rollback stage: FAIL\n");
+    }
+
+    fs.reset_image();
+    UserProcessImage output{};
+    uint64_t saved_flags;
+    asm volatile("pushfq; popq %0; cli" : "=r"(saved_flags) :: "memory");
+    UserProcessCreateResult created = attempt_initial_user_process(fs, -1, &output);
+    bool setup_ok = created.error == UserProcessCreateError::Success && output.process &&
+        output.entry_point == 0x00400000 && output.initial_stack_pointer &&
+        !(output.initial_stack_pointer & 0xF) &&
+        output.process->state() == ProcessState::Ready &&
+        output.mapped_memory_size == 2 * PAGE_SIZE && output.load_segment_count == 2 &&
+        output.process->scheduler_threads == 1;
+    if (setup_ok) {
+        address_space_runtime_expect_user_launch(output.process, output.entry_point,
+            output.entry_point + 34, output.initial_stack_pointer, 0x00500000);
+    }
+    asm volatile("pushq %0; popfq" :: "r"(saved_flags) : "memory", "cc");
+
+    if (!setup_ok) {
+        if (output.process && output.process->release() != ProcessResult::Success)
+            panic("Unable to release failed initial user-thread test process");
+        boot_diagnostics_write("initial user thread: FAIL (preparation)\n");
+        return false;
+    }
+
+    for (size_t attempt = 0; attempt < 1000 && !address_space_runtime_user_launch_seen(); ++attempt)
+        scheduler_yield();
+    bool entered = address_space_runtime_user_launch_seen() &&
+                   address_space_runtime_user_launch_matched();
+    boot_diagnostics_write(s_user_launch_vector_ok ? "user launch fault vector: PASS\n" : "user launch fault vector: FAIL\n");
+    boot_diagnostics_write(s_user_launch_cpl_ok ? "user launch privilege: PASS\n" : "user launch privilege: FAIL\n");
+    boot_diagnostics_write(s_user_launch_ip_ok ? "user launch entry IP: PASS\n" : "user launch entry IP: FAIL\n");
+    boot_diagnostics_write(s_user_launch_offset_ok ? "user launch entry offset: PASS\n" : "user launch entry offset: FAIL\n");
+    boot_diagnostics_write(s_user_launch_stack_ok ? "user launch stack pointer: PASS\n" : "user launch stack pointer: FAIL\n");
+    boot_diagnostics_write(s_user_launch_owner_ok ? "user launch process association: PASS\n" : "user launch process association: FAIL\n");
+    boot_diagnostics_write(s_user_launch_marker_ok ? "user launch stack marker: PASS\n" : "user launch stack marker: FAIL\n");
+    diagnostic_write_u64("user launch actual vector: ", s_user_launch_actual_vector);
+    diagnostic_write_u64("user launch actual RIP: ", s_user_launch_actual_ip);
+    diagnostic_write_u64("user launch expected RIP: ", output.entry_point + 34);
+    for (size_t attempt = 0; attempt < 1000 && output.process->state() != ProcessState::Exited;
+         ++attempt)
+        scheduler_yield();
+    bool retired = output.process->state() == ProcessState::Exited &&
+                   scheduler_count_process_threads(output.process) == 0;
+    boot_diagnostics_write(entered ? "user launch entry/context: PASS\n" :
+                                     "user launch entry/context: FAIL\n");
+    boot_diagnostics_write(retired ? "user launch thread retirement: PASS\n" :
+                                     "user launch thread retirement: FAIL\n");
+    bool released = output.process->release() == ProcessResult::Success;
+    bool passed = entered && retired && released;
+    ok &= passed;
+    boot_diagnostics_write(passed ? "initial user thread ring3 execution: PASS\n" :
+                                    "initial user thread ring3 execution: FAIL\n");
+    return ok;
 }
 
 static bool run_user_fault_case(const char* name, uintptr_t target, bool write_target,
@@ -159,8 +425,7 @@ static bool run_user_fault_case(const char* name, uintptr_t target, bool write_t
 
     uintptr_t root = process->page_table_phys;
     address_space_runtime_expect_fault(nx_code ? code_va : target, 14);
-    scheduler_add_thread(thread);
-    if (thread->state == THREAD_DEAD) {
+    if (scheduler_add_thread(thread) != SchedulerPublishResult::Success) {
         s_expect_user_fault = false;
         delete thread;
         if (process->release() != ProcessResult::Success) return false;
@@ -241,8 +506,7 @@ static bool run_user_syscall_pointer_test() {
 
     uintptr_t root = process->page_table_phys;
     address_space_runtime_expect_fault(0, 6);
-    scheduler_add_thread(thread);
-    if (thread->state == THREAD_DEAD) {
+    if (scheduler_add_thread(thread) != SchedulerPublishResult::Success) {
         s_expect_user_fault = false;
         delete thread;
         if (process->release() != ProcessResult::Success) return false;
@@ -323,8 +587,7 @@ static bool run_user_mmap_test(bool verify_munmap) {
     uintptr_t root = process->page_table_phys;
     uintptr_t expected_address = mapped_va;
     address_space_runtime_expect_fault(expected_address, 14);
-    scheduler_add_thread(thread);
-    if (thread->state == THREAD_DEAD) {
+    if (scheduler_add_thread(thread) != SchedulerPublishResult::Success) {
         s_expect_user_fault = false;
         delete thread;
         if (process->release() != ProcessResult::Success) return false;
@@ -358,6 +621,7 @@ static bool run_user_mmap_test(bool verify_munmap) {
 bool run_address_space_runtime_test() {
     boot_diagnostics_write("address-space test: begin\n");
     bool ok = run_empty_process_creation_test();
+    ok &= run_initial_user_thread_test();
     bool timeout_recovered = smp_test_timeout_recovery();
     ok &= timeout_recovered;
     boot_diagnostics_write(timeout_recovered ? "SMP timeout recovery: PASS\n" : "SMP timeout recovery: FAIL\n");
@@ -487,8 +751,18 @@ bool run_address_space_runtime_test() {
         boot_diagnostics_write("address-space test: FAIL creating shared-thread process\n");
         return false;
     }
-    scheduler_add_thread(first);
-    scheduler_add_thread(second);
+    bool first_published = scheduler_add_thread(first) == SchedulerPublishResult::Success;
+    bool second_published = first_published &&
+        scheduler_add_thread(second) == SchedulerPublishResult::Success;
+    if (!first_published || !second_published) {
+        if (first_published) scheduler_terminate_thread(first);
+        if (second_published) scheduler_terminate_thread(second);
+        while (scheduler_count_process_threads(process)) scheduler_yield();
+        if (!first_published) delete first;
+        if (!second_published) delete second;
+        if (process->release() != ProcessResult::Success) return false;
+        return false;
+    }
     bool refs_block_destroy = vmm_destroy_address_space(process->page_table_phys) ==
                               VmmAddressSpaceResult::AddressSpaceInUse;
     scheduler_terminate_thread(first);
@@ -570,6 +844,7 @@ bool run_address_space_runtime_test() {
         stress_ok &= vmm_query_mapping(stress_va, &info) && info.physical_page == stress_frame_b;
         stress_ok &= vmm_switch_address_space(kernel_root) == VmmAddressSpaceResult::Success;
     }
+    if (!stress_ok) boot_diagnostics_write("address-space registry stress: mapping/reference verification failed\n");
     for (size_t i = 0; i < stress_count; i += 2)
         stress_ok &= vmm_destroy_address_space(stress_roots[i]) == VmmAddressSpaceResult::Success;
     for (size_t i = 1; i < stress_count; i += 2)
@@ -614,9 +889,19 @@ bool run_smp_kernel_scheduler_runtime_test() {
         return false;
     }
     s_smp_kernel_counter = 0;
-    scheduler_add_thread(first);
-    scheduler_add_thread(second);
-    bool enrolled = first->scheduler_enrolled && second->scheduler_enrolled;
+    bool first_published = scheduler_add_thread(first) == SchedulerPublishResult::Success;
+    bool second_published = first_published &&
+        scheduler_add_thread(second) == SchedulerPublishResult::Success;
+    bool enrolled = first_published && second_published;
+    if (!enrolled) {
+        if (first_published) scheduler_terminate_thread(first);
+        if (second_published) scheduler_terminate_thread(second);
+        while (scheduler_count_process_threads(process)) scheduler_yield();
+        if (!first_published) delete first;
+        if (!second_published) delete second;
+        if (process->release() != ProcessResult::Success) return false;
+        return false;
+    }
     uint32_t lo, hi;
     uint64_t start, now;
     asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -714,19 +999,18 @@ bool run_smp_user_scheduler_runtime_test() {
         return false;
     }
     uint64_t ap_syscalls_before = smp_ap_syscall_count();
-    if (ok) {
-        scheduler_add_thread(first);
-        scheduler_add_thread(second);
-        ok &= first->scheduler_enrolled && second->scheduler_enrolled;
-    }
+    bool first_published = ok &&
+        scheduler_add_thread(first) == SchedulerPublishResult::Success;
+    bool second_published = first_published &&
+        scheduler_add_thread(second) == SchedulerPublishResult::Success;
+    ok &= first_published && second_published;
     if (!ok) {
-        if (first->scheduler_enrolled) scheduler_terminate_thread(first);
-        if (second->scheduler_enrolled) scheduler_terminate_thread(second);
-        if (!first->scheduler_enrolled) delete first;
-        if (!second->scheduler_enrolled) delete second;
-        if (!first->scheduler_enrolled && !second->scheduler_enrolled) {
-            if (process->release() != ProcessResult::Success) return false;
-        }
+        if (first_published) scheduler_terminate_thread(first);
+        if (second_published) scheduler_terminate_thread(second);
+        while (scheduler_count_process_threads(process)) scheduler_yield();
+        if (!first_published) delete first;
+        if (!second_published) delete second;
+        if (process->release() != ProcessResult::Success) return false;
         boot_diagnostics_write("SMP user scheduling: FAIL (enqueue)\n");
         return false;
     }
@@ -834,9 +1118,21 @@ bool run_smp_independent_user_runtime_test() {
         return false;
     }
 
-    scheduler_add_thread(first);
-    scheduler_add_thread(second);
-    bool enrolled = first->scheduler_enrolled && second->scheduler_enrolled;
+    bool first_published = scheduler_add_thread(first) == SchedulerPublishResult::Success;
+    bool second_published = first_published &&
+        scheduler_add_thread(second) == SchedulerPublishResult::Success;
+    bool enrolled = first_published && second_published;
+    if (!enrolled) {
+        if (first_published) scheduler_terminate_thread(first);
+        if (second_published) scheduler_terminate_thread(second);
+        while (scheduler_count_process_threads(first_process) ||
+               scheduler_count_process_threads(second_process)) scheduler_yield();
+        if (!first_published) delete first;
+        if (!second_published) delete second;
+        if (first_process->release() != ProcessResult::Success ||
+            second_process->release() != ProcessResult::Success) return false;
+        return false;
+    }
     uint32_t lo, hi;
     asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
     uint64_t start = (static_cast<uint64_t>(hi) << 32) | lo;

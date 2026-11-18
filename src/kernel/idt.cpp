@@ -88,7 +88,8 @@ extern "C" void isr_handler(Context* ctx) {
                     if (result == VmFaultResult::Resolved) return;
                 }
             }
-            bool expected_test_fault = address_space_runtime_record_fault(ctx->int_no, fault_address);
+            bool expected_test_fault = address_space_runtime_record_fault(
+                ctx->int_no, fault_address, ctx);
             // Don't crash the kernel! Kill the offending thread.
             if (g_vga && !expected_test_fault) {
                 g_vga->write("\n[Ring3 Fault #");
