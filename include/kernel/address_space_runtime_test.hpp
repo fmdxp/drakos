@@ -9,8 +9,7 @@ struct Context;
 class Process;
 bool address_space_runtime_record_fault(uint64_t vector, uintptr_t fault_address,
                                         const Context* context);
-void address_space_runtime_expect_user_launch(Process* process, uintptr_t entry_point,
-                                              uintptr_t fault_ip,
+void address_space_runtime_expect_user_launch(Process* process, uintptr_t fault_ip,
                                               uintptr_t stack_pointer,
                                               uintptr_t marker_address);
 bool address_space_runtime_user_launch_seen();

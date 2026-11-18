@@ -3,7 +3,10 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-extern "C" void _start() {
+extern "C" int main(int argc, char** argv, char** envp) {
+    (void)argc;
+    (void)argv;
+    (void)envp;
     printf("=======================================\n");
     printf("Hello from Ring 3 using drakos libc!\n");       // idk lowercase looks better ngl
     printf("PID: %d\n", getpid());

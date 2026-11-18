@@ -29,6 +29,7 @@ CXXFLAGS = -std=c++20 $(CFLAGS)
 
 TARGET_ELF = hello.elf
 TARGET_DRK = hello.drk
+ARGS_ENV_TEST_ELF = args_env_test.elf
 
 SRCS_C = $(wildcard libc/*.c)
 SRCS_CXX = hello.cpp
@@ -36,7 +37,7 @@ SRCS_S = $(wildcard libc/*.S)
 
 OBJS = $(SRCS_C:.c=.o) $(SRCS_CXX:.cpp=.o) $(SRCS_S:.S=.o)
 
-all: $(TARGET_DRK)
+all: $(TARGET_DRK) $(ARGS_ENV_TEST_ELF)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -53,5 +54,9 @@ $(TARGET_ELF): $(OBJS)
 $(TARGET_DRK): $(TARGET_ELF)
 	$(PACKAGER) $(TARGET_ELF) $(TARGET_DRK)
 
+$(ARGS_ENV_TEST_ELF): ../src/kernel/user_args_test_blob.S args_env_test.ld
+	$(CC) $(CFLAGS) -c $< -o args_env_test.o
+	$(LD) -T args_env_test.ld -o $@ args_env_test.o
+
 clean:
-	rm -f *.o $(TARGET_ELF) $(TARGET_DRK)
+	rm -f *.o $(TARGET_ELF) $(TARGET_DRK) $(ARGS_ENV_TEST_ELF)

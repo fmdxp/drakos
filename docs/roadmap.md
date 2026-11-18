@@ -17,8 +17,12 @@ It does not imply that listed future capabilities already work.
   QEMU verifies user instructions, stack state, a `getpid` syscall, failure
   rollback, and deferred cleanup; normal boot still starts no user process.
   See [user-process-launch.md](user-process-launch.md).
-- **Milestones 4–9 not started:** arguments and environment,
-  exit and wait/reap semantics, parent-child management, initial userspace
+- **Milestone 4 complete:** bounded arguments and environment are copied to a
+  System V AMD64 initial stack; libc startup passes `(argc, argv, envp)` to
+  `main`; host and QEMU tests check the values. See
+  [user-process-launch.md](user-process-launch.md).
+- **Milestones 5–9 not started:** exit and wait/reap semantics,
+  parent-child management, initial userspace
   boot, SSM runtime integration, and later launch features remain unimplemented.
 
 ## System services

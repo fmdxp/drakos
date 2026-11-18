@@ -59,7 +59,7 @@ For serial smoke testing, add `-display none -serial stdio -monitor none` to the
 Run the host-side initcall, font, PMM, VMM/VM-region/page-cache, heap, and file-handle checks with:
 
 ```bash
-make test-initcalls test-font test-pmm test-vmm test-vm-regions test-heap test-handles
+make test-initcalls test-font test-pmm test-vmm test-vm-regions test-heap test-handles test-user-stack
 ```
 
 The framebuffer text renderer decodes UTF-8 and uses the bundled PSF1 font's Unicode table for supported glyphs; unsupported codepoints display as `?`.
@@ -74,7 +74,7 @@ The heap uses a lock that preserves shootdown IPI service while waiting across C
 
 Each user process receives a private lower-half address space and shares the supervisor-only kernel higher half. User page-table levels and leaves carry user permissions only for user mappings. EFER.NXE is enabled on CPUs that support it; ELF non-executable segments, user stacks, and non-executable anonymous mappings are marked NX. Syscall buffers and strings are checked against user mappings before access. Runtime QEMU checks cover kernel/read-only/private-page faults, NX, invalid syscall pointers, anonymous mapping permissions, unmapping, and address-space teardown.
 
-Kernel-side process creation has an explicit lifecycle and ownership transaction. `Process::create_user` can create an empty Ready process with an owned user address space. `user_process_create_from_elf` connects that lifecycle to the reusable ELF loader, prepares an aligned empty user stack and initial thread context, and publishes the thread only after initialization succeeds. It returns a creator-owned process reference and does not start a process during normal boot or expose a spawn syscall. Four-CPU QEMU tests execute a test ELF in ring 3, verify a `getpid` system call and stack state, and exercise failure rollback. Arguments and environment, regular exit semantics, exit-status collection, wait/reap, whole-process termination, parent-child relationships, and userspace spawn remain unimplemented. See [docs/process-lifecycle.md](docs/process-lifecycle.md), [docs/elf-loading.md](docs/elf-loading.md), and [docs/user-process-launch.md](docs/user-process-launch.md).
+Kernel-side process creation has an explicit lifecycle and ownership transaction. `user_process_create_from_elf` loads an ELF image, copies bounded argument and environment strings to a one-page System V AMD64 initial stack, and publishes the thread only after initialization succeeds. The stack supplies `argc`, `argv`, `envp`, null terminators, and an `AT_NULL` auxiliary-vector terminator; libc startup passes `(argc, argv, envp)` to `main`. `make test-user-stack` checks the layout on the host, `make -C userspace args_env_test.elf` builds a small standalone validation ELF, and the four-CPU `make qemu-test-address-space` check verifies argument/environment access from ring 3. The launcher remains kernel-side and normal boot does not start a user process. Exit-status collection, wait/reap, whole-process termination, parent-child relationships, and userspace spawn remain future work. See [docs/process-lifecycle.md](docs/process-lifecycle.md), [docs/elf-loading.md](docs/elf-loading.md), and [docs/user-process-launch.md](docs/user-process-launch.md).
 
 The four-CPU QEMU runtime test checks concurrent kernel threads, concurrent ring 3 threads sharing one address space, concurrent threads in independent address spaces, syscall entry on APs, process teardown, address-space isolation, and TLB shootdowns. Run it with `make qemu-test-address-space`.
 

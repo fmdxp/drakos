@@ -40,6 +40,22 @@ bool valid_initial_context(Process* process, const Thread* thread,
     VmRegionTable::release_snapshot(region);
     return stack_ok;
 }
+
+UserProcessCreateError map_argument_error(UserStackBuildResult error) {
+    switch (error) {
+        case UserStackBuildResult::InvalidArguments:
+            return UserProcessCreateError::InvalidArguments;
+        case UserStackBuildResult::CountLimitExceeded:
+        case UserStackBuildResult::StringTooLong:
+            return UserProcessCreateError::ArgumentLimitExceeded;
+        case UserStackBuildResult::StringStorageLimitExceeded:
+        case UserStackBuildResult::StackTooSmall:
+            return UserProcessCreateError::ArgumentStorageExceeded;
+        case UserStackBuildResult::Success:
+            return UserProcessCreateError::Success;
+    }
+    return UserProcessCreateError::InvalidArguments;
+}
 }
 
 void user_process_test_fail_next_thread_allocation() {
@@ -49,9 +65,18 @@ void user_process_test_fail_next_thread_allocation() {
 UserProcessCreateResult user_process_create_from_elf(VFS::FileObject& file,
                                                       uint64_t file_offset,
                                                       uint64_t file_size,
-                                                      UserProcessImage* output) {
+                                                      UserProcessImage* output,
+                                                      const UserProcessArguments* arguments) {
     if (output) *output = {};
     if (!output) return create_result(UserProcessCreateError::InvalidArgument);
+    const UserProcessArguments empty_arguments{};
+    const UserProcessArguments& requested_arguments = arguments ? *arguments : empty_arguments;
+    uintptr_t ignored_stack_pointer = 0;
+    UserStackBuildResult argument_validation = user_stack_build(nullptr,
+        USER_PROCESS_STACK_SIZE, 0,
+        requested_arguments, &ignored_stack_pointer);
+    if (argument_validation != UserStackBuildResult::Success)
+        return create_result(map_argument_error(argument_validation));
 
     Process* process = nullptr;
     ProcessResult process_result = Process::create_user(&process);
@@ -77,7 +102,7 @@ UserProcessCreateResult user_process_create_from_elf(VFS::FileObject& file,
     Thread* thread = nullptr;
     if (!__atomic_exchange_n(&s_fail_next_thread_allocation, false, __ATOMIC_ACQ_REL))
         thread = new Thread(process, reinterpret_cast<void(*)()>(image.entry_point),
-                            true, "user-main");
+                            true, "user-main", arguments);
     if (!thread) {
         cleanup_unpublished(process, nullptr);
         return create_result(UserProcessCreateError::ThreadAllocationFailed);
@@ -87,7 +112,11 @@ UserProcessCreateResult user_process_create_from_elf(VFS::FileObject& file,
         ThreadInitResult thread_error = thread->initialization_result;
         VmmMapResult mapping_error = thread->stack_mapping_error;
         VmRegionResult region_error = thread->stack_region_error;
+        UserStackBuildResult stack_error = thread->user_stack_error;
         cleanup_unpublished(process, thread);
+        if (thread_error == ThreadInitResult::InvalidUserArguments ||
+            thread_error == ThreadInitResult::UserArgumentsTooLarge)
+            return create_result(map_argument_error(stack_error));
         UserProcessCreateResult result = create_result(
             UserProcessCreateError::ThreadInitializationFailed);
         result.thread_error = thread_error;

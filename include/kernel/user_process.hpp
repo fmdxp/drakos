@@ -16,6 +16,9 @@ enum class UserProcessCreateError : uint8_t {
     ThreadInitializationFailed,
     InvalidThreadContext,
     SchedulerPublicationFailed,
+    InvalidArguments,
+    ArgumentLimitExceeded,
+    ArgumentStorageExceeded,
     CleanupFailed,
 };
 
@@ -43,7 +46,8 @@ struct UserProcessCreateResult {
 UserProcessCreateResult user_process_create_from_elf(VFS::FileObject& file,
                                                       uint64_t file_offset,
                                                       uint64_t file_size,
-                                                      UserProcessImage* output);
+                                                      UserProcessImage* output,
+                                                      const UserProcessArguments* arguments = nullptr);
 
 // Test seam used by QEMU runtime tests to exercise thread-allocation rollback.
 void user_process_test_fail_next_thread_allocation();

@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include "kernel/handle.hpp"
 #include "kernel/vm_region.hpp"
+#include "kernel/user_stack.hpp"
 #include "memory/vmm.hpp"
 
 // Avx/Fpu State Size (2688 for AVX512, 512 for standard FXSAVE)
@@ -119,6 +120,8 @@ enum class ThreadInitResult : uint8_t {
     UserStackOutOfMemory,
     UserStackMappingFailed,
     UserStackRegionFailed,
+    InvalidUserArguments,
+    UserArgumentsTooLarge,
     InjectedFailure,
 };
 
@@ -136,7 +139,8 @@ enum class SchedulerPublishResult : uint8_t {
 
 class Thread {
 public:
-    Thread(Process* parent, void (*entry_point)(), bool is_user, const char* const thread_name);
+    Thread(Process* parent, void (*entry_point)(), bool is_user, const char* const thread_name,
+           const UserProcessArguments* arguments = nullptr);
     ~Thread();
 
     // Thread ID
@@ -160,6 +164,7 @@ public:
     ThreadInitResult initialization_result;
     VmmMapResult stack_mapping_error;
     VmRegionResult stack_region_error;
+    UserStackBuildResult user_stack_error;
     bool address_space_retained;
     bool scheduler_enrolled;
     bool process_final_thread;

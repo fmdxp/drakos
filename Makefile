@@ -85,7 +85,7 @@ LDFLAGS	=	-T linker.ld -nostdlib
 
 ## Targets ##
 
-.PHONY: all clean run debug images test-initcalls test-font test-pmm test-vmm test-heap test-handles test-vm-regions test-ssm qemu-test-address-space
+.PHONY: all clean run debug images test-initcalls test-font test-pmm test-vmm test-heap test-handles test-vm-regions test-ssm test-user-stack qemu-test-address-space
 
 all: $(ISO)
 
@@ -199,6 +199,7 @@ qemu-test-address-space: $(ISO)
 	cat "$$test_root/serial.log"; \
 	grep -q 'initial user thread ring3 execution: PASS' "$$test_root/serial.log"; \
 	grep -q 'user launch thread retirement: PASS' "$$test_root/serial.log"; \
+	grep -q 'user launch arguments and environment: PASS' "$$test_root/serial.log"; \
 	test "$$(grep -c 'user launch rollback stage: PASS' "$$test_root/serial.log")" -eq 6; \
 	grep -q 'address-space test: PASS' "$$test_root/serial.log"; \
 	grep -q 'SMP scheduler CPU initialization: PASS' "$$test_root/serial.log"; \
@@ -248,6 +249,13 @@ build/ssm_core_tests: tests/ssm_core_test.cpp userspace/ssm/service_manager.cpp 
 
 test-ssm: build/ssm_core_tests
 	./build/ssm_core_tests
+
+build/user_stack_tests: tests/user_stack_test.cpp include/kernel/user_stack.hpp
+	@mkdir -p $(BUILD)
+	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -Iinclude $< -o $@
+
+test-user-stack: build/user_stack_tests
+	./build/user_stack_tests
 
 build/pmm_tests: tests/pmm_test.cpp src/memory/pmm.cpp include/memory/pmm.hpp include/kernel/limine_requests.hpp
 	@mkdir -p $(BUILD)

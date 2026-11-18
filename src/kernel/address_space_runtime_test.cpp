@@ -11,6 +11,10 @@
 #include "memory/vmm.hpp"
 #include "cpu.hpp"
 
+extern "C" const uint8_t user_args_test_start[];
+extern "C" const uint8_t user_args_test_success_fault[];
+extern "C" const uint8_t user_args_test_end[];
+
 static volatile bool s_expect_user_fault = false;
 static volatile bool s_user_fault_seen = false;
 static volatile bool s_user_fault_matched = false;
@@ -27,12 +31,12 @@ static volatile bool s_user_launch_offset_ok = false;
 static volatile bool s_user_launch_stack_ok = false;
 static volatile bool s_user_launch_owner_ok = false;
 static volatile bool s_user_launch_marker_ok = false;
+static volatile bool s_user_launch_arguments_ok = false;
 static volatile uint64_t s_user_launch_actual_vector = 0;
 static volatile uintptr_t s_user_launch_actual_ip = 0;
 static uintptr_t s_expected_fault_address = 0;
 static uint64_t s_expected_fault_vector = 0;
 static Process* s_expected_launch_process = nullptr;
-static uintptr_t s_expected_launch_entry = 0;
 static uintptr_t s_expected_launch_fault_ip = 0;
 static uintptr_t s_expected_launch_stack = 0;
 static uintptr_t s_expected_launch_marker = 0;
@@ -93,25 +97,12 @@ public:
         header->e_phentsize = sizeof(Elf64_Phdr);
         header->e_phnum = 2;
         auto* programs = reinterpret_cast<Elf64_Phdr*>(image + sizeof(Elf64_Ehdr));
-        programs[0] = {PT_LOAD, PF_R | PF_X, 0x1000, 0x00400000, 0, 38, PAGE_SIZE, PAGE_SIZE};
+        size_t test_code_size = static_cast<size_t>(user_args_test_end - user_args_test_start);
+        programs[0] = {PT_LOAD, PF_R | PF_X, 0x1000, 0x00400000, 0,
+                       test_code_size, PAGE_SIZE, PAGE_SIZE};
         programs[1] = {PT_LOAD, PF_R | PF_W, 0x2000, 0x00500000, 0, 8, PAGE_SIZE, PAGE_SIZE};
-
-        // Read argc=0 at the initial RSP, save RSP, call getpid through
-        // SYSCALL, save RAX, then execute UD2 for controlled CPL3 observation.
-        const uint8_t user_code[] = {
-            0x48, 0x89, 0xE0,                   // mov %rsp,%rax
-            0x48, 0x83, 0x3C, 0x24, 0x00,       // cmpq $0,(%rsp)
-            0x75, 0x1A,                         // jne bad_stack
-            0x48, 0xBB, 0x00, 0x00, 0x50, 0x00,
-            0x00, 0x00, 0x00, 0x00,             // movabs $0x500000,%rbx
-            0x48, 0x89, 0x03,                   // mov %rax,(%rbx)
-            0xB8, 0x27, 0x00, 0x00, 0x00,       // mov $39,%eax (getpid)
-            0x0F, 0x05,                         // syscall
-            0x48, 0x89, 0x43, 0x08,             // mov %rax,8(%rbx)
-            0x0F, 0x0B,                         // ud2
-            0x0F, 0x0B                          // bad_stack: ud2
-        };
-        for (size_t i = 0; i < sizeof(user_code); ++i) image[0x1000 + i] = user_code[i];
+        for (size_t i = 0; i < test_code_size; ++i)
+            image[0x1000 + i] = user_args_test_start[i];
     }
 };
 
@@ -152,12 +143,10 @@ void address_space_runtime_expect_fault(uintptr_t fault_address, uint64_t vector
     s_expect_user_fault = true;
 }
 
-void address_space_runtime_expect_user_launch(Process* process, uintptr_t entry_point,
-                                              uintptr_t fault_ip,
+void address_space_runtime_expect_user_launch(Process* process, uintptr_t fault_ip,
                                               uintptr_t stack_pointer,
                                               uintptr_t marker_address) {
     s_expected_launch_process = process;
-    s_expected_launch_entry = entry_point;
     s_expected_launch_fault_ip = fault_ip;
     s_expected_launch_stack = stack_pointer;
     s_expected_launch_marker = marker_address;
@@ -171,6 +160,7 @@ void address_space_runtime_expect_user_launch(Process* process, uintptr_t entry_
     s_user_launch_stack_ok = false;
     s_user_launch_owner_ok = false;
     s_user_launch_marker_ok = false;
+    s_user_launch_arguments_ok = false;
     __atomic_store_n(&s_expect_user_launch, true, __ATOMIC_RELEASE);
 }
 
@@ -187,8 +177,7 @@ bool address_space_runtime_record_fault(uint64_t vector, uintptr_t fault_address
         s_user_launch_vector_ok = vector == 6;
         s_user_launch_cpl_ok = context && (context->cs & 3) == 3;
         s_user_launch_ip_ok = context && context->rip == s_expected_launch_fault_ip;
-        s_user_launch_offset_ok = context && context->rip >= s_expected_launch_entry &&
-            context->rip - s_expected_launch_entry == 34;
+        s_user_launch_offset_ok = context && context->rip == s_expected_launch_fault_ip;
         s_user_launch_stack_ok = context && context->rsp == s_expected_launch_stack;
         s_user_launch_owner_ok = current &&
             current->parent_process == s_expected_launch_process &&
@@ -207,9 +196,39 @@ bool address_space_runtime_record_fault(uint64_t vector, uintptr_t fault_address
             s_user_launch_marker_ok &= *saved_stack == s_expected_launch_stack &&
                                        *saved_pid == s_expected_launch_pid;
         }
+        VmmMappingInfo stack_mapping{};
+        s_user_launch_arguments_ok = context &&
+            vmm_query_mapping(context->rsp, &stack_mapping) &&
+            (stack_mapping.flags & (VMM_PRESENT | VMM_USER)) == (VMM_PRESENT | VMM_USER);
+        if (s_user_launch_arguments_ok) {
+            auto* stack_page = reinterpret_cast<const uint8_t*>(
+                stack_mapping.physical_page + pmm_hhdm_offset());
+            auto* words = reinterpret_cast<const uint64_t*>(
+                stack_page + (context->rsp & (PAGE_SIZE - 1)));
+            s_user_launch_arguments_ok = words[0] == 2 && words[1] && words[2] &&
+                words[3] == 0 && words[4] && words[5] == 0 &&
+                words[6] == 0 && words[7] == 0;
+            if (s_user_launch_arguments_ok) {
+                auto* argv0 = reinterpret_cast<const char*>(stack_page +
+                    (words[1] & (PAGE_SIZE - 1)));
+                auto* argv1 = reinterpret_cast<const char*>(stack_page +
+                    (words[2] & (PAGE_SIZE - 1)));
+                auto* env0 = reinterpret_cast<const char*>(stack_page +
+                    (words[4] & (PAGE_SIZE - 1)));
+                s_user_launch_arguments_ok = argv0[0] == 'a' && argv0[1] == 'l' &&
+                    argv0[2] == 'p' && argv0[3] == 'h' && argv0[4] == 'a' &&
+                    argv0[5] == 0 && argv1[0] == 'b' && argv1[1] == 'e' &&
+                    argv1[2] == 't' && argv1[3] == 'a' && argv1[4] == 0 &&
+                    env0[0] == 'M' &&
+                    env0[1] == 'O' && env0[2] == 'D' && env0[3] == 'E' &&
+                    env0[4] == '=' && env0[5] == 't' && env0[6] == 'e' &&
+                    env0[7] == 's' && env0[8] == 't' && env0[9] == 0;
+            }
+        }
         s_user_launch_matched = s_user_launch_vector_ok && s_user_launch_cpl_ok &&
             s_user_launch_ip_ok && s_user_launch_offset_ok &&
-            s_user_launch_stack_ok && s_user_launch_owner_ok && s_user_launch_marker_ok;
+            s_user_launch_stack_ok && s_user_launch_owner_ok && s_user_launch_marker_ok &&
+            s_user_launch_arguments_ok;
         __atomic_store_n(&s_expect_user_launch, false, __ATOMIC_RELEASE);
         return true;
     }
@@ -282,7 +301,10 @@ static UserProcessCreateResult attempt_initial_user_process(RuntimeElfFileSystem
         case 5: scheduler_test_fail_next_publication(); break;
         default: break;
     }
-    return user_process_create_from_elf(file, 0, sizeof(fs.image), output);
+    static const char* const argv[] = {"alpha", "beta"};
+    static const char* const envp[] = {"MODE=test"};
+    const UserProcessArguments arguments{argv, 2, envp, 1};
+    return user_process_create_from_elf(file, 0, sizeof(fs.image), output, &arguments);
 }
 
 static bool run_initial_user_thread_test() {
@@ -330,8 +352,9 @@ static bool run_initial_user_thread_test() {
         output.mapped_memory_size == 2 * PAGE_SIZE && output.load_segment_count == 2 &&
         output.process->scheduler_threads == 1;
     if (setup_ok) {
-        address_space_runtime_expect_user_launch(output.process, output.entry_point,
-            output.entry_point + 34, output.initial_stack_pointer, 0x00500000);
+        address_space_runtime_expect_user_launch(output.process,
+            output.entry_point + (user_args_test_success_fault - user_args_test_start),
+            output.initial_stack_pointer, 0x00500000);
     }
     asm volatile("pushq %0; popfq" :: "r"(saved_flags) : "memory", "cc");
 
@@ -353,9 +376,11 @@ static bool run_initial_user_thread_test() {
     boot_diagnostics_write(s_user_launch_stack_ok ? "user launch stack pointer: PASS\n" : "user launch stack pointer: FAIL\n");
     boot_diagnostics_write(s_user_launch_owner_ok ? "user launch process association: PASS\n" : "user launch process association: FAIL\n");
     boot_diagnostics_write(s_user_launch_marker_ok ? "user launch stack marker: PASS\n" : "user launch stack marker: FAIL\n");
+    boot_diagnostics_write(s_user_launch_arguments_ok ? "user launch arguments and environment: PASS\n" : "user launch arguments and environment: FAIL\n");
     diagnostic_write_u64("user launch actual vector: ", s_user_launch_actual_vector);
     diagnostic_write_u64("user launch actual RIP: ", s_user_launch_actual_ip);
-    diagnostic_write_u64("user launch expected RIP: ", output.entry_point + 34);
+    diagnostic_write_u64("user launch expected RIP: ", output.entry_point +
+        (user_args_test_success_fault - user_args_test_start));
     for (size_t attempt = 0; attempt < 1000 && output.process->state() != ProcessState::Exited;
          ++attempt)
         scheduler_yield();

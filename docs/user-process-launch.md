@@ -13,9 +13,10 @@ The preparation order is:
 2. Load and validate the ELF image into that address space and register its
    VM regions.
 3. Allocate the initial user thread, kernel stack, and one-page user stack.
-4. Initialize an empty System V AMD64 process-entry stack with 16-byte aligned
-   RSP, `argc = 0`, null `argv` and `envp` terminators, and a null auxiliary
-   vector terminator. Stack memory is zeroed before writing the initial words.
+4. Validate argument/environment arrays and bounded strings, then initialize a
+   System V AMD64 process-entry stack with copied strings, pointer arrays,
+   null terminators, a null auxiliary vector terminator, and 16-byte aligned
+   RSP. The strings and pointers are inside the process's one-page user stack.
 5. Validate the initial context and publish the fully initialized thread to
    the scheduler.
 
@@ -31,22 +32,42 @@ process, which reclaims ELF mappings, registered image regions, and any stack
 resource already attached. The supplied file remains caller-owned. Cleanup
 failures are treated as kernel errors instead of being silently ignored.
 
-The QEMU address-space test constructs a minimal ELF image in a test-only VFS
-file, launches it through this same API, and verifies ring-3 execution. The
-user program checks `argc`, saves its stack pointer, calls `getpid` through
-`SYSCALL`, stores the returned PID, and raises a controlled invalid-opcode
-exception. The kernel test checks the exception's CPL, RIP, RSP, process
-association, stack marker, and PID, then verifies scheduler retirement and
-deferred process cleanup. Failure injection covers ELF validation, thread
-allocation, user-stack allocation and mapping, thread initialization, and
-scheduler publication.
+`user_process_create_from_elf` accepts `UserProcessArguments` with kernel-owned
+pointer arrays. It rejects missing arrays or strings, more than 32 arguments
+or environment entries, strings longer than 255 bytes plus NUL, and aggregate
+string storage above 2048 bytes. Pointers are copied into the user stack; no
+kernel pointer is exposed. The caller must provide readable kernel pointers
+that remain stable for the duration of the call. Invalid input is rejected
+before process/address-space allocation, and stack-construction failures
+prevent scheduler publication.
+
+At ELF entry, RSP points to `argc`, followed by `argv[0..argc-1]`,
+`argv[argc] == NULL`, `envp[0..envc-1]`, `envp[envc] == NULL`, and the
+`AT_NULL, 0` auxiliary-vector terminator. RSP is 16-byte aligned. Argument,
+environment, and terminator pointers are user virtual addresses in the stack
+page. `userspace/libc/crt0.S` passes these values as `(argc, argv, envp)` to
+`main`; existing applications can ignore them. The libc does not yet parse
+auxiliary-vector entries or provide a richer process startup runtime.
+
+The built `userspace/args_env_test.elf` validates the entry stack. The QEMU
+address-space test uses the same assembly test program in a minimal test ELF,
+launches it through this API with two arguments and one environment entry, and
+verifies ring-3 code checks, pointer/string contents, stack alignment, a
+`getpid` syscall, and controlled invalid-opcode retirement. The kernel test
+also checks the exception's CPL, RIP, RSP, process association, and stack
+marker. Failure injection still covers ELF validation, thread allocation,
+user-stack allocation and mapping, thread initialization, and scheduler
+publication.
 
 ## Limits
 
 - This is a kernel-side preparation API; it is not exposed as a syscall and is
   not invoked during normal boot.
-- No arguments, environment variables, startup runtime, or initial userspace
-  process are provided.
+- The launcher remains a kernel API; normal boot does not start a userspace
+  process, and no syscall exposes process creation.
+- The one-page initial stack and fixed count/string/storage limits are
+  intentionally bounded. Auxiliary-vector data currently contains only
+  `AT_NULL`.
 - The test program terminates through the existing fault-retirement test path;
   normal process exit semantics remain future work.
 - ELF format limits are documented in [elf-loading.md](elf-loading.md).

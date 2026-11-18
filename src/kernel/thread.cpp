@@ -73,7 +73,9 @@ static void idle_main() {
 }
 
 
-Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unused]] const char* const thread_name) {
+Thread::Thread(Process* parent, void (*entry_point)(), bool is_user,
+               [[maybe_unused]] const char* const thread_name,
+               const UserProcessArguments* arguments) {
     static uint64_t next_tid = 1;
     tid = __atomic_add_fetch(&next_tid, 1, __ATOMIC_RELAXED) - 1;
     parent_process = parent;
@@ -86,6 +88,7 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
     initialization_result = ThreadInitResult::Success;
     stack_mapping_error = VmmMapResult::Success;
     stack_region_error = VmRegionResult::Success;
+    user_stack_error = UserStackBuildResult::Success;
     kernel_stack_base = 0;
     kernel_stack = 0;
     context = nullptr;
@@ -203,16 +206,18 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
             return;
         }
 
-        // Empty initial process stack: argc=0, argv=null, envp=null, AT_NULL=0.
-        uintptr_t initial_stack_pointer =
-            (user_stack_top - 5 * sizeof(uint64_t)) & ~static_cast<uintptr_t>(0xF);
-        auto* initial_words = reinterpret_cast<uint64_t*>(
-            stack_bytes + (initial_stack_pointer - user_stack_virt));
-        initial_words[0] = 0; // argc
-        initial_words[1] = 0; // argv terminator
-        initial_words[2] = 0; // envp terminator
-        initial_words[3] = 0; // AT_NULL
-        initial_words[4] = 0; // AT_NULL value
+        const UserProcessArguments empty_arguments{};
+        uintptr_t initial_stack_pointer = 0;
+        user_stack_error = user_stack_build(stack_bytes, PAGE_SIZE, user_stack_virt,
+            arguments ? *arguments : empty_arguments, &initial_stack_pointer);
+        if (user_stack_error != UserStackBuildResult::Success) {
+            state = THREAD_DEAD;
+            initialization_result =
+                user_stack_error == UserStackBuildResult::InvalidArguments
+                    ? ThreadInitResult::InvalidUserArguments
+                    : ThreadInitResult::UserArgumentsTooLarge;
+            return;
+        }
         context->rsp = initial_stack_pointer;
     } else {
         context->cs = 0x08; // KERNEL_CS
