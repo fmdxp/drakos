@@ -253,9 +253,9 @@ build/pmm_tests: tests/pmm_test.cpp src/memory/pmm.cpp include/memory/pmm.hpp in
 test-pmm: build/pmm_tests
 	./build/pmm_tests
 
-build/vmm_tests: tests/vmm_test.cpp tests/vm_region_test.cpp tests/page_cache_test.cpp tests/process_lifecycle_test.cpp src/kernel/process.cpp src/kernel/vm_region.cpp src/kernel/handle.cpp src/fs/page_cache.cpp src/fs/vfs.cpp src/memory/pmm.cpp src/memory/vmm.cpp include/memory/pmm.hpp include/memory/vmm.hpp include/kernel/limine_requests.hpp include/kernel/vm_region.hpp include/fs/page_cache.hpp include/kernel/thread.hpp
+build/vmm_tests: tests/vmm_test.cpp tests/vm_region_test.cpp tests/page_cache_test.cpp tests/process_lifecycle_test.cpp tests/elf_loader_test.cpp src/kernel/elf_loader.cpp src/kernel/process.cpp src/kernel/vm_region.cpp src/kernel/handle.cpp src/fs/page_cache.cpp src/fs/vfs.cpp src/memory/pmm.cpp src/memory/vmm.cpp include/memory/pmm.hpp include/memory/vmm.hpp include/kernel/limine_requests.hpp include/kernel/vm_region.hpp include/kernel/elf_loader.hpp include/kernel/elf.hpp include/fs/page_cache.hpp include/kernel/thread.hpp
 	@mkdir -p $(BUILD)
-	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -pthread -DDRAKOS_HOST_TEST -Iinclude -Iinclude/memory -Iinclude/kernel -Iinclude/fs -Iinclude/drivers $< tests/vm_region_test.cpp tests/page_cache_test.cpp tests/process_lifecycle_test.cpp src/kernel/process.cpp src/kernel/vm_region.cpp src/kernel/handle.cpp src/fs/page_cache.cpp src/fs/vfs.cpp src/memory/pmm.cpp src/memory/vmm.cpp -o $@
+	$(HOST_CXX) -std=c++20 -Wall -Wextra -Werror -pthread -DDRAKOS_HOST_TEST -Iinclude -Iinclude/memory -Iinclude/kernel -Iinclude/fs -Iinclude/drivers $< tests/vm_region_test.cpp tests/page_cache_test.cpp tests/process_lifecycle_test.cpp tests/elf_loader_test.cpp src/kernel/elf_loader.cpp src/kernel/process.cpp src/kernel/vm_region.cpp src/kernel/handle.cpp src/fs/page_cache.cpp src/fs/vfs.cpp src/memory/pmm.cpp src/memory/vmm.cpp -o $@
 
 test-vmm: build/vmm_tests
 	./build/vmm_tests

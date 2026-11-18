@@ -12,6 +12,13 @@ typedef uint64_t Elf64_Xword;
 
 #define EI_NIDENT 16
 
+#define EI_CLASS 4
+#define EI_DATA 5
+#define EI_VERSION 6
+#define ELFCLASS64 2
+#define ELFDATA2LSB 1
+#define EV_CURRENT 1
+
 struct Elf64_Ehdr {
     unsigned char e_ident[EI_NIDENT];
     Elf64_Half    e_type;
@@ -48,6 +55,8 @@ struct Elf64_Phdr {
 #define PT_NOTE    4
 #define PT_SHLIB   5
 #define PT_PHDR    6
+#define PT_TLS     7
+#define PT_GNU_STACK 0x6474E551
 
 // Segment flags
 #define PF_X 1
@@ -60,3 +69,6 @@ struct Elf64_Phdr {
 // e_type
 #define ET_EXEC 2
 #define ET_DYN  3
+
+static_assert(sizeof(Elf64_Ehdr) == 64, "ELF64 header layout mismatch");
+static_assert(sizeof(Elf64_Phdr) == 56, "ELF64 program header layout mismatch");

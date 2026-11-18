@@ -44,10 +44,6 @@
 #include "address_space_runtime_test.hpp"
 #include "kernel/smp.hpp"
 
-#include "elf.hpp"
-#include "drk.hpp"
-
-
 static void make_threads_and_processes()
 {
     Process* usb_proc = new Process();
@@ -76,12 +72,6 @@ static void make_threads_and_processes()
         if (gamepad_proc->release() != ProcessResult::Success)
             panic("Unable to release gamepad worker process owner reference");
     }
-
-    // // --- Ring 3 App Loader ---
-    // DRK::DrkLoader* loader = new DRK::DrkLoader();
-    // if (loader->load("/nvme/HELLO.DRK")) {
-    //     if (g_vga) g_vga->write("Successfully loaded hello.drk!\n");
-    // } else if (g_vga) g_vga->write("Failed to load hello.drk.\n");
 
     // g_kernel_thread = scheduler_get_current_thread();
 }

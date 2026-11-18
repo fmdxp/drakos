@@ -15,11 +15,14 @@ volatile struct limine_hhdm_request g_hhdm_request = {};
 bool smp_tlb_invalidate_page(uintptr_t) { return true; }
 bool smp_tlb_flush_non_global() { return true; }
 bool smp_address_space_active(uintptr_t) { return false; }
-bool nx_enabled() { return false; }
+static bool test_nx_enabled = false;
+bool nx_enabled() { return test_nx_enabled; }
+void vmm_test_set_nx_enabled(bool enabled) { test_nx_enabled = enabled; }
 [[noreturn]] void panic(const char*, InterruptFrame*) { std::abort(); }
 bool run_vm_region_metadata_test();
 bool run_page_cache_test();
 bool run_process_lifecycle_test();
+bool run_elf_loader_test();
 VGA* g_vga = nullptr;
 void VGA::write(const char*) {}
 
@@ -127,6 +130,7 @@ int main() {
     ok &= check(run_vm_region_metadata_test(), "region metadata and lifetime checks pass");
     ok &= check(run_page_cache_test(), "page-cache host checks pass");
     ok &= check(run_process_lifecycle_test(), "process lifecycle and creation transaction checks pass");
+    ok &= check(run_elf_loader_test(), "ELF loader validation and rollback checks pass");
     uintptr_t kernel_root = vmm_get_kernel_pml4();
     uintptr_t phys = pmm_alloc_page();
     constexpr uintptr_t kernel_va = 0xFFFF900000001000ULL;

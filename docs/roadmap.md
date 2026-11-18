@@ -3,6 +3,19 @@
 This roadmap records implementation dependencies observed in the current tree.
 It does not imply that listed future capabilities already work.
 
+## Userspace process-launching foundation
+
+- **Milestone 1 complete:** process lifecycle, creator/thread/deferred-cleanup
+  references, explicit user address-space creation, and transactional process
+  initialization are documented in
+  [process-lifecycle.md](process-lifecycle.md).
+- **Milestone 2 complete:** reusable ELF64 `ET_EXEC` validation and loading
+  into a caller-owned address space is implemented and host-tested. The loader
+  does not create processes or threads; see [elf-loading.md](elf-loading.md).
+- **Milestones 3–9 not started:** process spawning, arguments and environment,
+  exit and wait/reap semantics, parent-child management, initial userspace
+  boot, SSM runtime integration, and later launch features remain unimplemented.
+
 ## System services
 
 The SSM host-side policy core is implemented in `userspace/ssm/`; service

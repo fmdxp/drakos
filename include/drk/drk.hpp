@@ -208,49 +208,6 @@ namespace DRK
 
     static_assert(sizeof(DrkHeader) == 192, "DrkHeader size changed!");
 
-
-
-    class DrkLoader
-    {
-    public:
-        DrkLoader();
-        ~DrkLoader();
-
-        bool load(const char* path);
-
-        bool parseHeader();
-        bool validate();
-
-        bool checkVersion();
-        bool checkRequirements();
-        bool checkSecurity();
-
-        bool loadExecutable();
-        bool loadAssets();
-        bool loadMetadata();
-
-        bool prepareExecution();
-
-        bool isValid() const;
-        bool isLoaded() const;
-
-        const DrkHeader& getHeader() const;
-
-    private: 
-        bool validateMagic();
-        bool validateOffsets();
-        bool validateSizes();
-        bool verifyHash();
-        bool verifySignature();
-
-        const char* filePath;
-        int fd;
-
-        DrkHeader header;
-
-        bool loaded;
-        bool valid;
-    };
 }
 
 #pragma pack(pop)
