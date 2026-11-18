@@ -19,6 +19,7 @@ bool nx_enabled() { return false; }
 [[noreturn]] void panic(const char*, InterruptFrame*) { std::abort(); }
 bool run_vm_region_metadata_test();
 bool run_page_cache_test();
+bool run_process_lifecycle_test();
 VGA* g_vga = nullptr;
 void VGA::write(const char*) {}
 
@@ -125,6 +126,7 @@ int main() {
     bool ok = check(vmm.start(), "VMM creates a kernel page table over the fake PMM");
     ok &= check(run_vm_region_metadata_test(), "region metadata and lifetime checks pass");
     ok &= check(run_page_cache_test(), "page-cache host checks pass");
+    ok &= check(run_process_lifecycle_test(), "process lifecycle and creation transaction checks pass");
     uintptr_t kernel_root = vmm_get_kernel_pml4();
     uintptr_t phys = pmm_alloc_page();
     constexpr uintptr_t kernel_va = 0xFFFF900000001000ULL;

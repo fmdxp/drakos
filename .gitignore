@@ -15,3 +15,9 @@
 *.elf
 *.EFI
 *.img
+
+
+
+# drakos ELFs
+
+*.drk

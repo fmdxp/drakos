@@ -22,6 +22,7 @@
 #include "pmm.hpp"
 #include "gdt.hpp"
 #include "kernel/smp.hpp"
+#include "kernel/panic.hpp"
 #include "cpu.hpp"
 #include "drivers/lapic.hpp"
 #include <stddef.h>
@@ -68,35 +69,6 @@ static void idle_main() {
 }
 
 
-Process::Process() {
-    static uint64_t next_pid = 1;
-    pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED) - 1;
-    is_user = false;
-    scheduler_threads = 0;
-    terminating = false;
-    next_user_stack_top = 0x00007FFFF0000000ULL;
-    scheduler_cleanup_pending = false;
-    scheduler_next_pending = nullptr;
-    next_mmap_address = 0x100000000ULL;
-    // Default: use the kernel master PML4.
-    // User processes will override this in the Thread constructor.
-    page_table_phys = vmm_get_kernel_pml4();
-}
-
-Process::~Process() {
-    destroy();
-}
-
-bool Process::destroy() {
-    if (!is_user || !page_table_phys) return true;
-    VmmAddressSpaceResult result = vmm_destroy_address_space(page_table_phys);
-    if (result != VmmAddressSpaceResult::Success) return false;
-    page_table_phys = vmm_get_kernel_pml4();
-    is_user = false;
-    vm_regions.clear();
-    return true;
-}
-
 Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unused]] const char* const thread_name) {
     static uint64_t next_tid = 1;
     tid = __atomic_add_fetch(&next_tid, 1, __ATOMIC_RELAXED) - 1;
@@ -110,6 +82,18 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
     kernel_stack_base = 0;
     kernel_stack = 0;
     context = nullptr;
+
+    if (!parent_process || !parent_process->retain()) {
+        parent_process = nullptr;
+        state = THREAD_DEAD;
+        return;
+    }
+    ProcessState process_state = parent_process->state();
+    if ((process_state != ProcessState::Ready && process_state != ProcessState::Running) ||
+        (is_user && (!parent_process->is_user || !parent_process->page_table_phys))) {
+        state = THREAD_DEAD;
+        return;
+    }
     
     // Allocate a 16KB kernel stack
     uint8_t* stack = new uint8_t[16384];
@@ -135,7 +119,6 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
     // Initialize FPU state to 0
     for (size_t i = 0; i < 4096; i++) fpu_state[i] = 0;
     
-    bool created_user_root = false;
     // Initialize the Interrupt Frame for IRETQ
     if (is_user) {
         context->cs = 0x20 | 3; // USER_CS with RPL 3
@@ -143,43 +126,33 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
         context->rflags = 0x202; // IF (Interrupts enabled)
         
         // Give this user process its own isolated address space
-        if (!parent_process) {
+        // Reserve a unique one-page stack slot with a one-page unmapped gap.
+        uintptr_t user_stack_phys = pmm_alloc_page();
+        if (!user_stack_phys) {
             state = THREAD_DEAD;
             return;
         }
-        if (!parent_process->is_user) {
-            parent_process->page_table_phys = vmm_create_address_space();
-            if (!parent_process->page_table_phys) {
+        uintptr_t user_stack_top = __atomic_load_n(&parent_process->next_user_stack_top,
+                                                    __ATOMIC_RELAXED);
+        uintptr_t next_stack_top = 0;
+        for (;;) {
+            if (user_stack_top < 2 * PAGE_SIZE) {
+                pmm_free_page(user_stack_phys);
                 state = THREAD_DEAD;
                 return;
             }
-            parent_process->is_user = true;
-            parent_process->next_user_stack_top = 0x00007FFFF0000000ULL;
-            created_user_root = true;
+            next_stack_top = user_stack_top - 2 * PAGE_SIZE;
+            if (__atomic_compare_exchange_n(&parent_process->next_user_stack_top,
+                                            &user_stack_top, next_stack_top, false,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+                break;
         }
-        
-        // Allocate User Stack (1 Page = 4KB) at 0x00007FFFF0000000
-        uintptr_t user_stack_phys = pmm_alloc_page();
-        if (!user_stack_phys) {
-            if (created_user_root) parent_process->destroy();
-            state = THREAD_DEAD;
-            return;
-        }
-        uintptr_t user_stack_top = parent_process->next_user_stack_top;
-        if (user_stack_top < 2 * PAGE_SIZE) {
-            pmm_free_page(user_stack_phys);
-            if (created_user_root) parent_process->destroy();
-            state = THREAD_DEAD;
-            return;
-        }
-        parent_process->next_user_stack_top = user_stack_top - 2 * PAGE_SIZE;
         uintptr_t user_stack_virt = user_stack_top - PAGE_SIZE;
         uint64_t stack_flags = VMM_PRESENT | VMM_WRITE | VMM_USER;
         if (nx_enabled()) stack_flags |= VMM_NX;
         if (vmm_map_owned_page(parent_process->page_table_phys, user_stack_virt, user_stack_phys,
                                stack_flags) != VmmMapResult::Success) {
             pmm_free_page(user_stack_phys);
-            if (created_user_root) parent_process->destroy();
             state = THREAD_DEAD;
             return;
         }
@@ -187,8 +160,9 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user, [[maybe_unu
             VmRegionType::Stack, VmRegionSharing::Private, 0,
             user_stack_virt, user_stack_virt + PAGE_SIZE, 0, nullptr};
         if (parent_process->vm_regions.insert(stack_region) != VmRegionResult::Success) {
-            (void)vmm_unmap_page(parent_process->page_table_phys, user_stack_virt);
-            if (created_user_root) parent_process->destroy();
+            if (vmm_unmap_page(parent_process->page_table_phys, user_stack_virt) !=
+                VmmUnmapResult::Success)
+                panic("Failed to roll back an unpublished user stack mapping");
             state = THREAD_DEAD;
             return;
         }
@@ -212,6 +186,13 @@ Thread::~Thread() {
     if (kernel_stack_base) {
         delete[] reinterpret_cast<uint8_t*>(kernel_stack_base);
         kernel_stack_base = 0;
+    }
+    if (parent_process) {
+        Process* process = parent_process;
+        parent_process = nullptr;
+        ProcessResult result = process->release();
+        if (result != ProcessResult::Success)
+            panic("Thread could not release its process reference");
     }
 }
 
@@ -259,16 +240,23 @@ void scheduler_activate_current_processor() {
 void scheduler_add_thread(Thread* thread) {
     if (!thread || thread->state == THREAD_DEAD || !thread->context ||
         !thread->kernel_stack_base || thread->scheduler_enrolled) return;
-    if (thread->parent_process && thread->parent_process->is_user) {
-        if (vmm_retain_address_space(thread->parent_process->page_table_phys) != VmmAddressSpaceResult::Success) {
+    Process* process = thread->parent_process;
+    if (!process || (process->state() != ProcessState::Ready &&
+                     process->state() != ProcessState::Running)) {
+        thread->state = THREAD_DEAD;
+        return;
+    }
+    if (process->is_user) {
+        if (vmm_retain_address_space(process->page_table_phys) != VmmAddressSpaceResult::Success) {
             thread->state = THREAD_DEAD;
             return;
         }
         thread->address_space_retained = true;
     }
     uint64_t flags = scheduler_lock();
-    Process* process = thread->parent_process;
-    if ((process && process->terminating) || !s_run_queue) {
+    ProcessState process_state = process->state();
+    if ((process_state != ProcessState::Ready && process_state != ProcessState::Running) ||
+        !s_run_queue) {
         scheduler_unlock(flags);
         if (thread->address_space_retained) {
             vmm_release_address_space(process->page_table_phys);
@@ -343,6 +331,10 @@ extern "C" Context* scheduler_switch(Context* current_context) {
         cpu->current = cpu->idle;
     }
 
+    Process* selected_process = cpu->current->parent_process;
+    bool selected_process_ready = !selected_process ||
+        selected_process->transition_to(ProcessState::Running);
+
     // Remove all dead threads from the shared run queue while transitions are
     // serialized. Frame/reference operations happen after releasing this lock.
     Thread* dead_threads = nullptr;
@@ -389,8 +381,11 @@ extern "C" Context* scheduler_switch(Context* current_context) {
     for (Thread* item = dead_threads; item; item = item->next) {
         Process* process = item->parent_process;
         if (process && process->scheduler_threads) --process->scheduler_threads;
-        item->process_final_thread = process && process->is_user && process->scheduler_threads == 0;
-        if (item->process_final_thread) process->terminating = true;
+        item->process_final_thread = process && process->scheduler_threads == 0;
+        if (item->process_final_thread) {
+            if (!process->transition_to(ProcessState::Terminating) || !process->retain())
+                panic("Final process thread could not retain terminal cleanup ownership");
+        }
         item->scheduler_enrolled = false;
     }
 
@@ -399,6 +394,7 @@ extern "C" Context* scheduler_switch(Context* current_context) {
         ? selected->parent_process->page_table_phys : vmm_get_kernel_pml4();
     Context* selected_context = selected->context;
     scheduler_unlock(flags);
+    if (!selected_process_ready) panic("Scheduler selected a process that is not ready");
 
     // Never spin with interrupts disabled on the VMM lock here: its owner may
     // be waiting for this CPU to acknowledge a TLB IPI. Mask the local timer,
@@ -438,7 +434,6 @@ extern "C" Context* scheduler_switch(Context* current_context) {
                 panic("Unable to release thread address-space reference");
             item->address_space_retained = false;
         }
-        item->parent_process = nullptr;
         if (item->process_final_thread) {
             uint64_t cleanup_flags = scheduler_lock();
             if (!process->scheduler_cleanup_pending) {
@@ -467,8 +462,10 @@ extern "C" Context* scheduler_switch(Context* current_context) {
         Process* process = pending;
         pending = process->scheduler_next_pending;
         process->scheduler_next_pending = nullptr;
-        if (process->destroy()) {
-            delete process;
+        ProcessResult result = process->finalize_termination();
+        if (result == ProcessResult::Success) {
+            if (process->release() != ProcessResult::Success)
+                panic("Scheduler could not release terminal process ownership");
         } else {
             uint64_t retry_flags = scheduler_lock();
             if (!process->scheduler_cleanup_pending) {

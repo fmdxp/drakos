@@ -51,13 +51,31 @@
 static void make_threads_and_processes()
 {
     Process* usb_proc = new Process();
-    g_usb_thread = new Thread(usb_proc, usb_thread_main, false, "USB Controller");
-    scheduler_add_thread(g_usb_thread);
+    if (usb_proc) {
+        g_usb_thread = new Thread(usb_proc, usb_thread_main, false, "USB Controller");
+        if (g_usb_thread && g_usb_thread->state != THREAD_DEAD)
+            scheduler_add_thread(g_usb_thread);
+        if (!g_usb_thread || !g_usb_thread->scheduler_enrolled) {
+            delete g_usb_thread;
+            g_usb_thread = nullptr;
+        }
+        if (usb_proc->release() != ProcessResult::Success)
+            panic("Unable to release USB worker process owner reference");
+    }
 
 
     Process* gamepad_proc = new Process();
-    g_gamepad_thread = new Thread(gamepad_proc, gamepad_thread_main, false, "Gamepad Debugger");
-    scheduler_add_thread(g_gamepad_thread);
+    if (gamepad_proc) {
+        g_gamepad_thread = new Thread(gamepad_proc, gamepad_thread_main, false, "Gamepad Debugger");
+        if (g_gamepad_thread && g_gamepad_thread->state != THREAD_DEAD)
+            scheduler_add_thread(g_gamepad_thread);
+        if (!g_gamepad_thread || !g_gamepad_thread->scheduler_enrolled) {
+            delete g_gamepad_thread;
+            g_gamepad_thread = nullptr;
+        }
+        if (gamepad_proc->release() != ProcessResult::Success)
+            panic("Unable to release gamepad worker process owner reference");
+    }
 
     // // --- Ring 3 App Loader ---
     // DRK::DrkLoader* loader = new DRK::DrkLoader();

@@ -36,11 +36,37 @@ struct Context {
     uint64_t rip, cs, rflags, rsp, ss;
 } __attribute__((packed));
 
+enum class ProcessState : uint8_t {
+    Created,
+    Initializing,
+    Ready,
+    Running,
+    Terminating,
+    Exited,
+};
+
+enum class ProcessResult : uint8_t {
+    Success,
+    InvalidArgument,
+    InvalidState,
+    OutOfMemory,
+    AddressSpaceFailure,
+    InUse,
+    ReferenceOverflow,
+    CleanupFailure,
+};
+
 class Process {
 public:
     Process();
-    ~Process();
-    bool destroy();
+    static ProcessResult create_user(Process** output);
+
+    bool retain();
+    ProcessResult release();
+    ProcessState state() const;
+    bool transition_to(ProcessState next);
+    ProcessResult finalize_termination();
+    uint32_t reference_count() const;
 
     // Process ID
     uint64_t pid;
@@ -51,13 +77,27 @@ public:
     // Process is user-mode process?
     bool is_user;
     uint32_t scheduler_threads;
-    bool terminating;
     uintptr_t next_user_stack_top;
     bool scheduler_cleanup_pending;
     Process* scheduler_next_pending;
     KernelHandleTable handles;
     VmRegionTable vm_regions;
     uintptr_t next_mmap_address;
+
+private:
+    struct UserProcessTag {};
+    explicit Process(UserProcessTag);
+    ~Process();
+    Process(const Process&) = delete;
+    Process& operator=(const Process&) = delete;
+
+    bool owns_address_space;
+    volatile uint32_t references;
+    volatile uint8_t lifecycle_state;
+
+    ProcessResult destroy_resources();
+    static bool valid_transition(ProcessState from, ProcessState to);
+    friend struct ProcessLifecycleTestAccess;
 };
 
 

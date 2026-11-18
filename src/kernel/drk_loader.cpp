@@ -113,22 +113,23 @@ bool DrkLoader::loadExecutable() {
         return false;
     }
 
-    // Create process (Thread constructor will create the address space)
-    Process* proc = new Process();
-    if (!proc) return false;
+    // Create an unpublished process and address space before allocating its thread.
+    Process* proc = nullptr;
+    if (Process::create_user(&proc) != ProcessResult::Success) return false;
 
     // Create Thread FIRST — this sets up proc->page_table_phys and the user stack
     Thread* user_thread = new Thread(proc, (void(*)())ehdr.e_entry, true, "DrkApp");
     if (!user_thread || user_thread->state == THREAD_DEAD) {
         delete user_thread;
-        if (proc->destroy()) delete proc;
+        if (proc->release() != ProcessResult::Success)
+            panic("DrkLoader could not roll back its unpublished process");
         return false;
     }
     auto cleanup_unqueued_thread = [&]() {
         user_thread->state = THREAD_DEAD;
-        bool address_space_destroyed = proc->destroy();
         delete user_thread;
-        if (address_space_destroyed) delete proc;
+        if (proc->release() != ProcessResult::Success)
+            panic("DrkLoader could not roll back its unpublished process");
     };
 
     // Now we have proc->page_table_phys — map ELF segments into it
@@ -204,6 +205,8 @@ bool DrkLoader::loadExecutable() {
         cleanup_unqueued_thread();
         return false;
     }
+    if (proc->release() != ProcessResult::Success)
+        panic("DrkLoader could not release its process creation reference");
     return true;
 }
 

@@ -83,23 +83,47 @@ static void runtime_test_thread_entry() {
     for (;;) asm volatile("hlt");
 }
 
+static Process* create_user_test_process() {
+    Process* process = nullptr;
+    return Process::create_user(&process) == ProcessResult::Success ? process : nullptr;
+}
+
+static bool release_test_process(Process* process) {
+    return !process || process->release() == ProcessResult::Success;
+}
+
+static bool run_empty_process_creation_test() {
+    Process* process = create_user_test_process();
+    if (!process) return false;
+    uintptr_t root = process->page_table_phys;
+    bool initialized_without_thread = process->state() == ProcessState::Ready &&
+        process->reference_count() == 1 && process->scheduler_threads == 0;
+    bool released = process->release() == ProcessResult::Success;
+    bool address_space_reclaimed =
+        vmm_retain_address_space(root) == VmmAddressSpaceResult::InvalidAddressSpace;
+    bool passed = initialized_without_thread && released && address_space_reclaimed;
+    boot_diagnostics_write(passed ? "process empty-create teardown: PASS\n" :
+                                    "process empty-create teardown: FAIL\n");
+    return passed;
+}
+
 static bool run_user_fault_case(const char* name, uintptr_t target, bool write_target,
                                 bool nx_code, uintptr_t extra_mapping = 0,
                                 uintptr_t extra_frame = 0, uint64_t extra_flags = 0) {
     constexpr uintptr_t code_va = 0x00400000;
-    Process* process = new Process();
+    Process* process = create_user_test_process();
     if (!process) return false;
     auto* thread = new Thread(process, reinterpret_cast<void(*)()>(code_va), true, name);
     if (!thread || thread->state == THREAD_DEAD) {
         delete thread;
-        if (process->destroy()) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         return false;
     }
 
     uintptr_t code_frame = pmm_alloc_page();
     if (!code_frame) {
         delete thread;
-        if (process->destroy()) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         return false;
     }
     uint64_t code_flags = VMM_PRESENT | VMM_USER;
@@ -108,13 +132,13 @@ static bool run_user_fault_case(const char* name, uintptr_t target, bool write_t
         VmmMapResult::Success) {
         pmm_free_page(code_frame);
         delete thread;
-        if (process->destroy()) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         return false;
     }
     if (extra_frame && vmm_map_owned_page(process->page_table_phys, extra_mapping,
                                           extra_frame, extra_flags) != VmmMapResult::Success) {
         delete thread;
-        if (process->destroy()) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         return false;
     }
 
@@ -139,7 +163,7 @@ static bool run_user_fault_case(const char* name, uintptr_t target, bool write_t
     if (thread->state == THREAD_DEAD) {
         s_expect_user_fault = false;
         delete thread;
-        if (process->destroy()) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         return false;
     }
     for (size_t i = 0; i < 100 && !address_space_runtime_fault_seen(); ++i)
@@ -153,7 +177,9 @@ static bool run_user_fault_case(const char* name, uintptr_t target, bool write_t
     bool torn_down = wait_address_space_destroyed(root);
     bool owned_frames_released = !pmm_is_allocated_page(code_frame) &&
         (!extra_frame || !pmm_is_allocated_page(extra_frame));
-    bool passed = fault_ok && torn_down && owned_frames_released;
+    bool process_exited = process->state() == ProcessState::Exited;
+    bool process_released = release_test_process(process);
+    bool passed = fault_ok && torn_down && owned_frames_released && process_exited && process_released;
     boot_diagnostics_write(passed ? "process isolation " : "process isolation ");
     boot_diagnostics_write(name);
     boot_diagnostics_write(passed ? ": PASS\n" : ": FAIL\n");
@@ -164,7 +190,7 @@ static bool run_user_syscall_pointer_test() {
     constexpr uintptr_t code_va = 0x00400000;
     constexpr uintptr_t result_va = 0x00600000;
     constexpr uintptr_t bad_user_va = 0x0000000000BAD000ULL;
-    Process* process = new Process();
+    Process* process = create_user_test_process();
     if (!process) return false;
     auto* thread = new Thread(process, reinterpret_cast<void(*)()>(code_va), true,
                               "syscall-pointer-validation");
@@ -174,7 +200,7 @@ static bool run_user_syscall_pointer_test() {
         if (code_frame) pmm_free_page(code_frame);
         if (result_frame) pmm_free_page(result_frame);
         delete thread;
-        if (process->destroy()) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         return false;
     }
     if (vmm_map_owned_page(process->page_table_phys, code_va, code_frame,
@@ -182,8 +208,7 @@ static bool run_user_syscall_pointer_test() {
         vmm_map_page(process->page_table_phys, result_va, result_frame,
                      VMM_PRESENT | VMM_WRITE | VMM_USER) != VmmMapResult::Success) {
         delete thread;
-        bool destroyed = process->destroy();
-        if (destroyed) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         if (pmm_is_allocated_page(code_frame)) pmm_free_page(code_frame);
         if (pmm_is_allocated_page(result_frame)) pmm_free_page(result_frame);
         return false;
@@ -220,8 +245,7 @@ static bool run_user_syscall_pointer_test() {
     if (thread->state == THREAD_DEAD) {
         s_expect_user_fault = false;
         delete thread;
-        bool destroyed = process->destroy();
-        if (destroyed) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         if (pmm_is_allocated_page(result_frame)) pmm_free_page(result_frame);
         return false;
     }
@@ -239,7 +263,9 @@ static bool run_user_syscall_pointer_test() {
     bool torn_down = wait_address_space_destroyed(root);
     bool borrowed_frame_preserved = pmm_is_allocated_page(result_frame);
     pmm_free_page(result_frame); // borrowed user mapping must not own this frame
-    bool passed = syscall_rejected_pointer && expected_end && torn_down && borrowed_frame_preserved;
+    bool process_released = release_test_process(process);
+    bool passed = syscall_rejected_pointer && expected_end && torn_down &&
+                  borrowed_frame_preserved && process_released;
     boot_diagnostics_write(passed ? "process isolation syscall-pointer-validation: PASS\n" :
                                      "process isolation syscall-pointer-validation: FAIL\n");
     return passed;
@@ -248,7 +274,7 @@ static bool run_user_syscall_pointer_test() {
 static bool run_user_mmap_test(bool verify_munmap) {
     constexpr uintptr_t code_va = 0x00400000;
     constexpr uintptr_t mapped_va = 0x100000000ULL;
-    Process* process = new Process();
+    Process* process = create_user_test_process();
     if (!process) return false;
     auto* thread = new Thread(process, reinterpret_cast<void(*)()>(code_va), true,
                               verify_munmap ? "mmap-munmap" : "mmap-read-only");
@@ -256,14 +282,14 @@ static bool run_user_mmap_test(bool verify_munmap) {
     if (!thread || thread->state == THREAD_DEAD || !code_frame) {
         if (code_frame) pmm_free_page(code_frame);
         delete thread;
-        if (process->destroy()) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         return false;
     }
     if (vmm_map_owned_page(process->page_table_phys, code_va, code_frame,
                            VMM_PRESENT | VMM_USER) != VmmMapResult::Success) {
         pmm_free_page(code_frame);
         delete thread;
-        if (process->destroy()) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         return false;
     }
 
@@ -301,7 +327,7 @@ static bool run_user_mmap_test(bool verify_munmap) {
     if (thread->state == THREAD_DEAD) {
         s_expect_user_fault = false;
         delete thread;
-        if (process->destroy()) delete process;
+        if (process->release() != ProcessResult::Success) return false;
         return false;
     }
     for (size_t i = 0; i < 100 && !address_space_runtime_fault_seen(); ++i)
@@ -320,7 +346,9 @@ static bool run_user_mmap_test(bool verify_munmap) {
         ? !mapping_found
         : (mapping_found && mapping_owned && (leaf_flags & (VMM_PRESENT | VMM_USER | VMM_NX)) ==
               (VMM_PRESENT | VMM_USER | VMM_NX) && !(leaf_flags & VMM_WRITE));
-    bool passed = fault_ok && torn_down && permissions_ok && !pmm_is_allocated_page(code_frame);
+    bool process_released = release_test_process(process);
+    bool passed = fault_ok && torn_down && permissions_ok &&
+                  !pmm_is_allocated_page(code_frame) && process_released;
     boot_diagnostics_write(passed ? "process isolation " : "process isolation ");
     boot_diagnostics_write(verify_munmap ? "mmap-munmap" : "mmap-permissions");
     boot_diagnostics_write(passed ? ": PASS\n" : ": FAIL\n");
@@ -329,7 +357,7 @@ static bool run_user_mmap_test(bool verify_munmap) {
 
 bool run_address_space_runtime_test() {
     boot_diagnostics_write("address-space test: begin\n");
-    bool ok = true;
+    bool ok = run_empty_process_creation_test();
     bool timeout_recovered = smp_test_timeout_recovery();
     ok &= timeout_recovered;
     boot_diagnostics_write(timeout_recovered ? "SMP timeout recovery: PASS\n" : "SMP timeout recovery: FAIL\n");
@@ -447,19 +475,18 @@ bool run_address_space_runtime_test() {
     pmm_free_page(mmio_frame);
 
     // Exercise scheduler-owned references with two threads sharing one process root.
-    Process* process = new Process();
+    Process* process = create_user_test_process();
+    if (!process) return false;
+    uintptr_t process_root = process->page_table_phys;
     Thread* first = new Thread(process, runtime_test_thread_entry, false, "address-space-test-a");
     Thread* second = new Thread(process, runtime_test_thread_entry, false, "address-space-test-b");
-    process->page_table_phys = vmm_create_address_space();
-    process->is_user = process->page_table_phys != 0;
-    if (!process->is_user || !first || !second) {
+    if (!first || !second || first->state == THREAD_DEAD || second->state == THREAD_DEAD) {
+        delete first;
+        delete second;
+        if (process->release() != ProcessResult::Success) return false;
         boot_diagnostics_write("address-space test: FAIL creating shared-thread process\n");
         return false;
     }
-    // Threads inherit the process root before scheduler enrollment.
-    first->parent_process = process;
-    second->parent_process = process;
-    uintptr_t process_root = process->page_table_phys;
     scheduler_add_thread(first);
     scheduler_add_thread(second);
     bool refs_block_destroy = vmm_destroy_address_space(process->page_table_phys) ==
@@ -469,7 +496,8 @@ bool run_address_space_runtime_test() {
     scheduler_yield();
     bool dead_threads_released = vmm_retain_address_space(process_root) ==
                                  VmmAddressSpaceResult::InvalidAddressSpace;
-    ok &= refs_block_destroy && dead_threads_released;
+    bool process_released = process->release() == ProcessResult::Success;
+    ok &= refs_block_destroy && dead_threads_released && process_released;
 
     // Run real CPL3 instruction streams and require controlled #PFs at the
     // expected addresses. The exception handler records these test faults and
@@ -581,7 +609,7 @@ bool run_smp_kernel_scheduler_runtime_test() {
     if (!ok) {
         delete first;
         delete second;
-        delete process;
+        if (process && process->release() != ProcessResult::Success) return false;
         boot_diagnostics_write("SMP concurrent kernel threads: FAIL (setup)\n");
         return false;
     }
@@ -623,8 +651,8 @@ bool run_smp_kernel_scheduler_runtime_test() {
         asm volatile("pause");
     }
     reclaimed = scheduler_count_process_threads(process) == 0;
-    delete process;
-    ok = enrolled && concurrent && migrated && reclaimed;
+    bool process_released = process->release() == ProcessResult::Success;
+    ok = enrolled && concurrent && migrated && reclaimed && process_released;
     boot_diagnostics_write(ok ? "SMP concurrent kernel threads: PASS\n"
                               : "SMP concurrent kernel threads: FAIL\n");
     boot_diagnostics_write(migrated ? "SMP thread migration: PASS\n"
@@ -640,14 +668,12 @@ bool run_smp_user_scheduler_runtime_test() {
 
     constexpr uintptr_t code_va = 0x00400000;
     constexpr uintptr_t data_va = 0x00401000;
-    Process* process = new Process();
+    Process* process = create_user_test_process();
     if (!process) return false;
-    process->page_table_phys = vmm_create_address_space();
-    process->is_user = process->page_table_phys != 0;
     uintptr_t root = process->page_table_phys;
     uintptr_t code_frame = pmm_alloc_page();
     uintptr_t data_frame = pmm_alloc_page();
-    bool ok = process->is_user && code_frame && data_frame;
+    bool ok = code_frame && data_frame;
     if (ok) {
         // User code performs getpid through SYSCALL and atomically increments
         // a shared counter forever. Timer interrupts must preempt it on each CPU.
@@ -683,8 +709,7 @@ bool run_smp_user_scheduler_runtime_test() {
     if (!ok) {
         delete first;
         delete second;
-        if (process->is_user) (void)process->destroy();
-        delete process;
+        if (process->release() != ProcessResult::Success) return false;
         boot_diagnostics_write("SMP user scheduling: FAIL (setup)\n");
         return false;
     }
@@ -700,8 +725,7 @@ bool run_smp_user_scheduler_runtime_test() {
         if (!first->scheduler_enrolled) delete first;
         if (!second->scheduler_enrolled) delete second;
         if (!first->scheduler_enrolled && !second->scheduler_enrolled) {
-            if (process->is_user) (void)process->destroy();
-            delete process;
+            if (process->release() != ProcessResult::Success) return false;
         }
         boot_diagnostics_write("SMP user scheduling: FAIL (enqueue)\n");
         return false;
@@ -748,6 +772,7 @@ bool run_smp_user_scheduler_runtime_test() {
         }
     }
     ok &= concurrent && syscall_progress && reclaimed;
+    ok &= process->release() == ProcessResult::Success;
     boot_diagnostics_write(concurrent ? "SMP shared address-space execution: PASS\n"
                                       : "SMP shared address-space execution: FAIL\n");
     boot_diagnostics_write(syscall_progress ? "SMP AP syscall progress: PASS\n"
@@ -760,25 +785,20 @@ bool run_smp_user_scheduler_runtime_test() {
 bool run_smp_independent_user_runtime_test() {
     constexpr uintptr_t code_va = 0x00400000;
     constexpr uintptr_t data_va = 0x00401000;
-    Process* first_process = new Process();
-    Process* second_process = new Process();
+    Process* first_process = create_user_test_process();
+    Process* second_process = create_user_test_process();
     if (!first_process || !second_process) {
-        delete first_process;
-        delete second_process;
+        if (first_process && first_process->release() != ProcessResult::Success) return false;
+        if (second_process && second_process->release() != ProcessResult::Success) return false;
         return false;
     }
-    first_process->page_table_phys = vmm_create_address_space();
-    first_process->is_user = first_process->page_table_phys != 0;
-    second_process->page_table_phys = vmm_create_address_space();
-    second_process->is_user = second_process->page_table_phys != 0;
     uintptr_t first_root = first_process->page_table_phys;
     uintptr_t second_root = second_process->page_table_phys;
     uintptr_t first_code = pmm_alloc_page();
     uintptr_t first_data = pmm_alloc_page();
     uintptr_t second_code = pmm_alloc_page();
     uintptr_t second_data = pmm_alloc_page();
-    bool setup = first_process->is_user && second_process->is_user && first_code &&
-                 first_data && second_code && second_data;
+    bool setup = first_code && first_data && second_code && second_data;
     if (setup) {
         install_smp_user_counter_program(first_code);
         install_smp_user_counter_program(second_code);
@@ -803,14 +823,13 @@ bool run_smp_independent_user_runtime_test() {
     if (!setup) {
         delete first;
         delete second;
-        if (first_process->is_user) (void)first_process->destroy();
-        if (second_process->is_user) (void)second_process->destroy();
+        if (first_process->release() != ProcessResult::Success ||
+            second_process->release() != ProcessResult::Success)
+            return false;
         if (first_code && pmm_is_allocated_page(first_code)) pmm_free_page(first_code);
         if (first_data && pmm_is_allocated_page(first_data)) pmm_free_page(first_data);
         if (second_code && pmm_is_allocated_page(second_code)) pmm_free_page(second_code);
         if (second_data && pmm_is_allocated_page(second_data)) pmm_free_page(second_data);
-        delete first_process;
-        delete second_process;
         boot_diagnostics_write("SMP independent address spaces: FAIL (setup)\n");
         return false;
     }
@@ -857,7 +876,10 @@ bool run_smp_independent_user_runtime_test() {
         if (now - start > 5000000000ULL) break;
         asm volatile("pause");
     }
-    bool ok = enrolled && concurrent && progress && reclaimed_first && reclaimed_second;
+    bool processes_released = first_process->release() == ProcessResult::Success &&
+                              second_process->release() == ProcessResult::Success;
+    bool ok = enrolled && concurrent && progress && reclaimed_first && reclaimed_second &&
+              processes_released;
     boot_diagnostics_write(ok ? "SMP independent address spaces: PASS\n"
                               : "SMP independent address spaces: FAIL\n");
     return ok;

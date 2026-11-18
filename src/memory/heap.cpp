@@ -24,7 +24,9 @@
 
 #include <stdint.h>
 
+#ifndef DRAKOS_HOST_TEST
 namespace std { enum class align_val_t : size_t {}; }
+#endif
 
 struct FreeObject { FreeObject* next; };
 struct SlubCache { size_t object_size; FreeObject* free_list; };

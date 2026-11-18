@@ -6,8 +6,8 @@ Welcome to **drakos**! 🎮
 
 drakos is an open-source, bare-metal operating system built from scratch in C++. 
 
-> [!WARNING]
-> ⚠️ I'm restarting the implementation in C++, I wasn't able to restart a project this big, so I'm continuing this in the hopes of achieving my goal.
+> [!NOTE]
+> 📝 Please check the **Development** tab down in the read me.
 
 ## 🎯 Our Vision
 
@@ -18,6 +18,9 @@ The goal is not to replace desktop operating systems, but to build a console-lik
 ## Current development status
 
 drakos is an early x86-64 kernel prototype. It includes a Limine UEFI boot path, memory management, interrupt and scheduler foundations, framebuffer text output, storage and USB driver prototypes, and a small experimental userspace. The boot and driver code is not a production system, and the Game Runtime, graphics APIs, emulators, and console-style interface are not implemented.
+
+> [!NOTE]
+> I'm bringing more docs to next commits, so stay tuned.
 
 ### Build prerequisites
 
@@ -71,6 +74,8 @@ The heap uses a lock that preserves shootdown IPI service while waiting across C
 
 Each user process receives a private lower-half address space and shares the supervisor-only kernel higher half. User page-table levels and leaves carry user permissions only for user mappings. EFER.NXE is enabled on CPUs that support it; ELF non-executable segments, user stacks, and non-executable anonymous mappings are marked NX. Syscall buffers and strings are checked against user mappings before access. Runtime QEMU checks cover kernel/read-only/private-page faults, NX, invalid syscall pointers, anonymous mapping permissions, unmapping, and address-space teardown.
 
+Kernel-side process creation now has an explicit lifecycle and ownership transaction. `Process::create_user` creates an empty Ready process with an owned user address space; creating a process no longer depends on constructing its first thread. Threads retain their process, and the SMP scheduler retains a cleanup reference while it defers final teardown. This does not add dynamic ELF loading, process exit-status collection, wait/reap, whole-process termination, parent-child relationships, a process registry, or userspace spawn. See [docs/process-lifecycle.md](docs/process-lifecycle.md) for the lifecycle and ownership rules.
+
 The four-CPU QEMU runtime test checks concurrent kernel threads, concurrent ring 3 threads sharing one address space, concurrent threads in independent address spaces, syscall entry on APs, process teardown, address-space isolation, and TLB shootdowns. Run it with `make qemu-test-address-space`.
 
 The syscall layer currently supports anonymous private mappings. Those mappings are tracked as process-scoped VM regions and allocate zero-filled pages on first access. `mprotect`, file-backed mapping syscalls, and a permission-controlled shared-memory API are not implemented. User file handles are process-scoped and generation-tagged; each handle retains a reference-counted `FileObject`, and in-flight operations retain their own reference so close cannot invalidate them. The kernel-side `vfs_*` descriptor API remains available for loader and driver code. A page cache now retains file objects and PMM-backed pages by stable file identity and page offset, shares cache entries across opens, updates cached pages after VFS writes, and reclaims unreferenced pages. File-backed VM fault resolution and Copy-on-Write are not implemented yet; file I/O is kept out of the page-fault interrupt path until the kernel has a safe deferred-I/O mechanism. On CPUs without NX support, the kernel cannot enforce execute-disable permissions. These limits mean userspace isolation remains an early kernel boundary rather than a complete process security model.
@@ -78,6 +83,19 @@ The syscall layer currently supports anonymous private mappings. Those mappings 
 ### System Service Manager status
 
 The repository contains a host-testable userspace SSM policy core for version 1 service configuration parsing, deterministic dependency planning, required dependency failure gating, lifecycle transition validation, and bounded restart policy/backoff. Run `make test-ssm` to exercise it. The core is not yet a running service manager: the kernel does not expose userspace process creation, wait/exit-status collection, or process termination control, the normal boot path does not start an initial userspace process, and no userspace IPC/service-discovery facility exists. Therefore it cannot launch, monitor, restart, or shut down services, and no SSM QEMU runtime test is claimed. See [docs/system-service-manager.md](docs/system-service-manager.md) and [docs/roadmap.md](docs/roadmap.md) for the configuration and the incremental prerequisites.
+
+
+## 💻 Development
+
+drakos is a personally directed operating system project.
+
+Developing a complete operating system independently is an enormous undertaking. It involves countless interconnected subsystems, complex low-level engineering, extensive testing, and years of development. For a solo developer, implementing and maintaining every component entirely by hand can become impractical.
+
+Development began with entirely manual implementation and has since evolved into an AI-assisted workflow. AI tools, primarily OpenAI Codex, are used to accelerate implementation, architectural exploration, debugging, testing, and documentation.
+
+The project's vision, architecture, technical direction, design decisions, requirements, and long-term roadmap remain personally directed. AI-generated contributions are reviewed, tested, and integrated as part of the development process.
+
+The intention is not to replace personal development, but to make an ambitious project achievable. As drakos evolves, more direct implementation is planned, particularly across userspace, the graphical environment, system interfaces, and the overall user experience.
 
 ## 🤝 Contribution
 
