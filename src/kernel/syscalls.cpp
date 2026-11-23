@@ -420,6 +420,30 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
             break;
         }
 
+        case 62: { // terminate (direct-child pid, requested exit status)
+            Process* requester = current_user_process();
+            if (!requester) { ret = -EPERM; break; }
+            ProcessTerminationRequestResult result = process_terminate_child(requester,
+                frame->rdi, static_cast<int32_t>(static_cast<uint32_t>(frame->rsi)));
+            switch (result) {
+                case ProcessTerminationRequestResult::Success:
+                case ProcessTerminationRequestResult::AlreadyTerminating:
+                    ret = 0;
+                    break;
+                case ProcessTerminationRequestResult::InvalidPid:
+                    ret = -EINVAL;
+                    break;
+                case ProcessTerminationRequestResult::NoSuchProcess:
+                case ProcessTerminationRequestResult::InvalidState:
+                    ret = -ESRCH;
+                    break;
+                case ProcessTerminationRequestResult::InvalidProcess:
+                    ret = -EPERM;
+                    break;
+            }
+            break;
+        }
+
         case 63: { // uname
             char* buf = (char*)frame->rdi;
             // struct utsname has 6 strings of 65 chars (sysname, nodename, release, version, machine, domainname)

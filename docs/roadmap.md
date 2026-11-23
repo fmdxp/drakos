@@ -31,9 +31,13 @@ It does not imply that listed future capabilities already work.
   collects status once, and safely orphans children when a parent exits. Host
   lifecycle tests and four-CPU QEMU wait/reap races pass. See
   [process-lifecycle.md](process-lifecycle.md).
-- **Milestones 7–9 not started:** userspace process spawning, initial
-  userspace boot, SSM runtime integration, and later launch features remain
-  unimplemented.
+- **Milestone 7 complete:** syscall 62 requests process-wide termination of a
+  direct child. The scheduler marks every target thread dead, reschedules
+  remote CPUs, and uses the existing deferred cleanup and `waitpid` status
+  paths. Four-CPU QEMU checks invalid/unrelated PIDs, a two-thread child, and
+  status collection; see [process-lifecycle.md](process-lifecycle.md).
+- **Milestones 8–9 not started:** later process/resource cleanup and userspace
+  launch integration work remain unimplemented.
 
 ## System services
 
@@ -44,7 +48,8 @@ in order:
 
 1. Start a first userspace process during boot and provide a safe userspace
    process creation API with arguments and environment.
-2. Add controlled process termination and shutdown timeout behavior.
+2. Add shutdown timeout behavior around the existing direct-child termination
+   syscall.
 3. Define a boot-available service configuration source.
 4. Add userspace IPC and service discovery/status messages.
 5. Integrate the SSM executable and verify multiple independent services,

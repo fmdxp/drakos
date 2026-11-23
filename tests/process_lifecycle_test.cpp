@@ -82,6 +82,12 @@ bool run_process_lifecycle_test() {
             parent->child_count() == 1 && child->reference_count() == 2;
         ok &= process_attach_child(parent, child) == ProcessRelationshipResult::DuplicateChild;
         ok &= process_attach_child(other_parent, child) == ProcessRelationshipResult::AlreadyParented;
+        ok &= process_terminate_child(parent, 0, 99) ==
+            ProcessTerminationRequestResult::InvalidPid;
+        ok &= process_terminate_child(parent, other_parent->pid, 99) ==
+            ProcessTerminationRequestResult::NoSuchProcess;
+        ok &= process_terminate_child(parent, child->pid, 99) ==
+            ProcessTerminationRequestResult::InvalidState;
 
         uint64_t child_pid = 0;
         int32_t status = -1;

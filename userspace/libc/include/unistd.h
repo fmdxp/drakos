@@ -15,6 +15,7 @@ int close(int fd);
 int lseek(int fd, int offset, int whence);
 int getpid(void);
 int64_t waitpid(int64_t pid, int32_t *status);
+int terminate(int64_t pid, int32_t status);
 void sched_yield(void);
 
 unsigned int sleep(unsigned int seconds);

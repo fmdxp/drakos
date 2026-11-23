@@ -2,9 +2,9 @@
 
 ## Scope
 
-This documents user-process creation, execution, process-wide exit,
-parent-child relationships, and wait/reap. External process termination,
-userspace spawning, and an initial userspace process are not provided.
+This documents user-process creation, execution, process-wide exit, controlled
+termination of direct children, parent-child relationships, and wait/reap.
+Userspace spawning and an initial userspace process are not provided.
 
 ## Lifecycle
 
@@ -33,7 +33,7 @@ successful wait removes the parent-child relationship while the Process object
 may remain alive for other outstanding references. Kernel worker processes use
 the kernel address space as a borrowed root and start Ready.
 
-## Process exit
+## Process exit and controlled termination
 
 The `exit` syscall stores its low 32-bit argument as a signed `int32_t` process
 exit status. The first exit request wins if multiple threads call `exit`
@@ -49,6 +49,25 @@ terminating process. It sends reschedule IPIs to other CPUs currently running
 its threads. Threads already inside a syscall are stopped before returning to
 userspace by the syscall return check; a thread already in userspace is
 preempted by its reschedule IPI. Other processes continue to schedule.
+
+Syscall 62, `terminate(pid, status)`, requests the same process-wide
+transition for one direct child. A process may target only a PID still present
+in its own child list, which is the authorization check; unrelated and reaped
+processes cannot be looked up or targeted. PID zero returns `EINVAL`; a PID
+that is not an unreaped direct child, or a child no longer in a terminable
+state, returns `ESRCH`; calls outside a user process return `EPERM`. Success
+returns zero. The target is retained while the relationship lock is released
+and the scheduler accepts the request, so concurrent reaping cannot invalidate
+the target pointer. The syscall never destroys the process directly.
+
+The scheduler applies the request under the run-queue lock used by thread
+publication and selection. It records the first requested status; later
+requests while the process is Terminating are idempotent and do not replace
+that status. It marks all enrolled target threads dead and sends reschedule
+IPIs to CPUs running them. A Ready child with no threads enters the existing
+deferred cleanup queue directly. Otherwise, the last safely retired thread
+queues that same cleanup path. `waitpid` observes the resulting Exited state
+and requested status through the existing child relationship.
 
 The final retired thread queues deferred process cleanup. Only after no thread
 can be running in the address space does the scheduler destroy process-owned
@@ -105,9 +124,11 @@ them. They do not leak solely because of an abandoned relationship, although
 other owners (including a process-creation caller reference) must still release
 their references. A future init process may add adoption policy.
 
-The relationship lock serializes concurrent exits, waiters, and reaps on SMP
-and is never held while a parent blocks. This does not add wait options,
-signaling, global PID lookup, or process spawning.
+The relationship lock serializes concurrent exits, termination requests,
+waiters, and reaps on SMP and is never held while a parent blocks. This does
+not add wait options, arbitrary cross-process signaling, global PID lookup, or
+process spawning. Termination is limited to direct children; there is no
+user/group privilege model.
 
 ## Creation transaction
 
@@ -174,13 +195,19 @@ remain outside the run-queue lock.
 ## Testing and limitations
 
 Host tests use the Process factory and VMM implementation to verify relationship
-registration, invalid/duplicate links, exit-before-wait collection, status
-preservation, one-time reaping, and orphan detachment. Four-CPU QEMU tests
+registration, invalid/duplicate links, direct-child target validation,
+exit-before-wait collection, status preservation, one-time reaping, and orphan
+detachment. Four-CPU QEMU tests
 exercise the userspace wait syscall, invalid status pointers, concurrent parent
 waiters, blocked wakeup, multiple child exits, single reaping, status copyout,
-and a parent exiting while a live orphan continues to run.
+and a parent exiting while a live orphan continues to run. The controlled
+termination QEMU test requests termination of a two-thread child from its
+parent, exercises cleanup of a Ready child with no threads, checks invalid and
+unrelated PIDs, verifies that both child threads stop on four CPUs, then
+collects the requested statuses with `waitpid`.
 
 Direct `scheduler_terminate_thread` still terminates one thread only; the
-userspace `exit` syscall is process-wide. Dynamic ELF loading and
+userspace `exit` syscall and direct-child `terminate` syscall are process-wide.
+Dynamic ELF loading and
 command-line/environment construction exist, while userspace spawn and SSM
 integration remain later milestones.

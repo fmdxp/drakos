@@ -32,6 +32,7 @@ uint64_t syscall6(uint64_t num, uint64_t arg1, uint64_t arg2, uint64_t arg3, uin
 #define SYS_getpid     39
 #define SYS_exit       60
 #define SYS_waitpid    61
+#define SYS_terminate  62
 #define SYS_uname      63
 #define SYS_fcntl      72
 #define SYS_getdents   78

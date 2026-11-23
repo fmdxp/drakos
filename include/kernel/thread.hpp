@@ -65,6 +65,15 @@ enum class ProcessExitRequestResult : uint8_t {
     InvalidProcess,
 };
 
+enum class ProcessTerminationRequestResult : uint8_t {
+    Success,
+    AlreadyTerminating,
+    InvalidProcess,
+    InvalidState,
+    InvalidPid,
+    NoSuchProcess,
+};
+
 enum class ProcessRelationshipResult : uint8_t {
     Success,
     InvalidProcess,
@@ -111,6 +120,7 @@ public:
     uint32_t scheduler_threads;
     uintptr_t next_user_stack_top;
     bool scheduler_cleanup_pending;
+    bool scheduler_cleanup_reference_held;
     Process* scheduler_next_pending;
     KernelHandleTable handles;
     VmRegionTable vm_regions;
@@ -137,10 +147,15 @@ private:
     static bool valid_transition(ProcessState from, ProcessState to);
     friend struct ProcessLifecycleTestAccess;
     friend ProcessExitRequestResult scheduler_exit_current_process(int32_t status);
+    friend ProcessTerminationRequestResult scheduler_terminate_process(Process* process,
+                                                                        int32_t status);
     friend ProcessRelationshipResult process_attach_child(Process* parent, Process* child);
     friend bool process_detach_child(Process* parent, Process* child);
     friend ProcessWaitResult process_wait_child(Process* parent, int64_t requested_pid,
                                                 uint64_t* child_pid, int32_t* exit_status);
+    friend ProcessTerminationRequestResult process_terminate_child(Process* requester,
+                                                                    uint64_t target_pid,
+                                                                    int32_t status);
     friend void process_finish_relationships(Process* process);
 };
 
@@ -239,6 +254,7 @@ void scheduler_wake_process_waiters(Process* wait_owner);
 void scheduler_wake_thread(Thread* t);
 void scheduler_terminate_thread(Thread* t);
 ProcessExitRequestResult scheduler_exit_current_process(int32_t status);
+ProcessTerminationRequestResult scheduler_terminate_process(Process* process, int32_t status);
 void scheduler_yield();
 Thread* scheduler_get_current_thread();
 uint32_t scheduler_count_running_process_cpus(const Process* process);
@@ -251,3 +267,6 @@ ProcessRelationshipResult process_attach_child(Process* parent, Process* child);
 bool process_detach_child(Process* parent, Process* child);
 ProcessWaitResult process_wait_child(Process* parent, int64_t requested_pid,
                                     uint64_t* child_pid, int32_t* exit_status);
+ProcessTerminationRequestResult process_terminate_child(Process* requester,
+                                                        uint64_t target_pid,
+                                                        int32_t status);

@@ -50,6 +50,17 @@ static volatile bool s_fail_next_user_stack_allocation = false;
 static volatile bool s_fail_next_user_stack_mapping = false;
 static volatile bool s_fail_next_thread_initialization = false;
 
+static void enqueue_process_cleanup_locked(Process* process) {
+    if (!process || process->scheduler_cleanup_pending) return;
+    if (!process->scheduler_cleanup_reference_held) {
+        if (!process->retain()) panic("Process cleanup ownership could not be retained");
+        process->scheduler_cleanup_reference_held = true;
+    }
+    process->scheduler_cleanup_pending = true;
+    process->scheduler_next_pending = s_pending_process_cleanup;
+    s_pending_process_cleanup = process;
+}
+
 static uint64_t scheduler_lock() {
     uint64_t flags;
     asm volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
@@ -458,8 +469,11 @@ extern "C" Context* scheduler_switch(Context* current_context) {
         if (process && process->scheduler_threads) --process->scheduler_threads;
         item->process_final_thread = process && process->scheduler_threads == 0;
         if (item->process_final_thread) {
-            if (!process->transition_to(ProcessState::Terminating) || !process->retain())
+            ProcessState process_state = process->state();
+            if ((process_state != ProcessState::Terminating &&
+                 !process->transition_to(ProcessState::Terminating)) || !process->retain())
                 panic("Final process thread could not retain terminal cleanup ownership");
+            process->scheduler_cleanup_reference_held = true;
         }
         item->scheduler_enrolled = false;
     }
@@ -511,11 +525,7 @@ extern "C" Context* scheduler_switch(Context* current_context) {
         }
         if (item->process_final_thread) {
             uint64_t cleanup_flags = scheduler_lock();
-            if (!process->scheduler_cleanup_pending) {
-                process->scheduler_cleanup_pending = true;
-                process->scheduler_next_pending = s_pending_process_cleanup;
-                s_pending_process_cleanup = process;
-            }
+            enqueue_process_cleanup_locked(process);
             scheduler_unlock(cleanup_flags);
         }
         uint64_t retire_flags = scheduler_lock();
@@ -539,15 +549,14 @@ extern "C" Context* scheduler_switch(Context* current_context) {
         process->scheduler_next_pending = nullptr;
         ProcessResult result = process->finalize_termination();
         if (result == ProcessResult::Success) {
+            uint64_t release_flags = scheduler_lock();
+            process->scheduler_cleanup_reference_held = false;
+            scheduler_unlock(release_flags);
             if (process->release() != ProcessResult::Success)
                 panic("Scheduler could not release terminal process ownership");
         } else {
             uint64_t retry_flags = scheduler_lock();
-            if (!process->scheduler_cleanup_pending) {
-                process->scheduler_cleanup_pending = true;
-                process->scheduler_next_pending = s_pending_process_cleanup;
-                s_pending_process_cleanup = process;
-            }
+            enqueue_process_cleanup_locked(process);
             scheduler_unlock(retry_flags);
         }
     }
@@ -648,20 +657,13 @@ void scheduler_terminate_thread(Thread* t) {
     scheduler_unlock(flags);
 }
 
-ProcessExitRequestResult scheduler_exit_current_process(int32_t status) {
+ProcessTerminationRequestResult scheduler_terminate_process(Process* process, int32_t status) {
     bool reschedule[SCHEDULER_MAX_CPUS] = {};
     uint32_t current_cpu = smp_current_processor_index();
     uint64_t flags = scheduler_lock();
-    CpuSchedulerState* cpu = current_cpu_state();
-    Thread* caller = cpu ? cpu->current : nullptr;
-    Process* process = caller ? caller->parent_process : nullptr;
-    if (!caller || !caller->scheduler_enrolled) {
-        scheduler_unlock(flags);
-        return ProcessExitRequestResult::InvalidThread;
-    }
     if (!process || !process->is_user) {
         scheduler_unlock(flags);
-        return ProcessExitRequestResult::InvalidProcess;
+        return ProcessTerminationRequestResult::InvalidProcess;
     }
 
     ProcessState state = process->state();
@@ -673,11 +675,11 @@ ProcessExitRequestResult scheduler_exit_current_process(int32_t status) {
         __atomic_store_n(&process->explicit_exit_status, true, __ATOMIC_RELEASE);
         if (!process->transition_to(ProcessState::Terminating)) {
             scheduler_unlock(flags);
-            return ProcessExitRequestResult::InvalidProcess;
+            return ProcessTerminationRequestResult::InvalidState;
         }
     } else if (state != ProcessState::Terminating) {
         scheduler_unlock(flags);
-        return ProcessExitRequestResult::InvalidProcess;
+        return ProcessTerminationRequestResult::InvalidState;
     }
 
     for (Thread* thread = s_run_queue, *first = s_run_queue;
@@ -691,14 +693,35 @@ ProcessExitRequestResult scheduler_exit_current_process(int32_t status) {
             target.current->parent_process == process)
             reschedule[index] = true;
     }
+    if (process->scheduler_threads == 0 &&
+        !process->scheduler_cleanup_reference_held && !process->scheduler_cleanup_pending)
+        enqueue_process_cleanup_locked(process);
     scheduler_unlock(flags);
 
     for (uint32_t index = 0; index < SCHEDULER_MAX_CPUS; ++index) {
         if (reschedule[index] && !smp_request_reschedule(index))
             panic("Unable to reschedule a CPU running an exiting process");
     }
-    return first_request ? ProcessExitRequestResult::Success
-                         : ProcessExitRequestResult::AlreadyTerminating;
+    return first_request ? ProcessTerminationRequestResult::Success
+                         : ProcessTerminationRequestResult::AlreadyTerminating;
+}
+
+ProcessExitRequestResult scheduler_exit_current_process(int32_t status) {
+    uint64_t flags = scheduler_lock();
+    CpuSchedulerState* cpu = current_cpu_state();
+    Thread* caller = cpu ? cpu->current : nullptr;
+    Process* process = caller ? caller->parent_process : nullptr;
+    bool valid_thread = caller && caller->scheduler_enrolled;
+    scheduler_unlock(flags);
+    if (!valid_thread) return ProcessExitRequestResult::InvalidThread;
+    if (!process || !process->is_user) return ProcessExitRequestResult::InvalidProcess;
+
+    ProcessTerminationRequestResult result = scheduler_terminate_process(process, status);
+    if (result == ProcessTerminationRequestResult::Success)
+        return ProcessExitRequestResult::Success;
+    if (result == ProcessTerminationRequestResult::AlreadyTerminating)
+        return ProcessExitRequestResult::AlreadyTerminating;
+    return ProcessExitRequestResult::InvalidProcess;
 }
 
 Thread* scheduler_get_current_thread() {

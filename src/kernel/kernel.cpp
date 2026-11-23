@@ -130,6 +130,8 @@ extern "C" [[noreturn]] void kernel_main(void)
             panic("Concurrent child wait/reap runtime test failed");
         if (!run_process_orphan_runtime_test())
             panic("Live-child orphan runtime test failed");
+        if (!run_process_termination_runtime_test())
+            panic("Controlled process termination runtime test failed");
         if (!run_smp_kernel_scheduler_runtime_test())
             panic("SMP kernel scheduler runtime test failed");
         if (!run_smp_user_scheduler_runtime_test())

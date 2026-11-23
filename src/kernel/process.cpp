@@ -50,12 +50,16 @@ bool scheduler_prepare_wait_current_thread(Process*) { return false; }
 void scheduler_clear_current_thread_wait() {}
 void scheduler_wake_process_waiters(Process*) {}
 void scheduler_yield() {}
+ProcessTerminationRequestResult scheduler_terminate_process(Process*, int32_t) {
+    return ProcessTerminationRequestResult::InvalidState;
+}
 #endif
 
 Process::Process()
     : pid(allocate_process_id()), page_table_phys(vmm_get_kernel_pml4()), is_user(false),
       scheduler_threads(0), next_user_stack_top(kInitialUserStackTop),
-      scheduler_cleanup_pending(false), scheduler_next_pending(nullptr),
+      scheduler_cleanup_pending(false), scheduler_cleanup_reference_held(false),
+      scheduler_next_pending(nullptr),
       handles(), vm_regions(), next_mmap_address(0x100000000ULL),
       owns_address_space(false), references(1),
       lifecycle_state(static_cast<uint8_t>(ProcessState::Ready)), stored_exit_status(0),
@@ -68,7 +72,8 @@ Process::Process()
 Process::Process(UserProcessTag)
     : pid(allocate_process_id()), page_table_phys(vmm_get_kernel_pml4()), is_user(false),
       scheduler_threads(0), next_user_stack_top(kInitialUserStackTop),
-      scheduler_cleanup_pending(false), scheduler_next_pending(nullptr),
+      scheduler_cleanup_pending(false), scheduler_cleanup_reference_held(false),
+      scheduler_next_pending(nullptr),
       handles(), vm_regions(), next_mmap_address(0x100000000ULL),
       owns_address_space(false), references(1),
       lifecycle_state(static_cast<uint8_t>(ProcessState::Created)), stored_exit_status(0),
@@ -78,7 +83,8 @@ Process::Process(UserProcessTag)
 }
 
 Process::~Process() {
-    if (owns_address_space || state() != ProcessState::Exited || relationship_parent ||
+    if (owns_address_space || state() != ProcessState::Exited ||
+        scheduler_cleanup_pending || scheduler_cleanup_reference_held || relationship_parent ||
         relationship_first_child || relationship_next_sibling)
         panic("Process released before reaching a resource-free terminal state");
 }
@@ -343,6 +349,37 @@ ProcessWaitResult process_wait_child(Process* parent, int64_t requested_pid,
         scheduler_yield();
         scheduler_clear_current_thread_wait();
     }
+}
+
+ProcessTerminationRequestResult process_terminate_child(Process* requester,
+                                                        uint64_t target_pid,
+                                                        int32_t status) {
+    if (!target_pid) return ProcessTerminationRequestResult::InvalidPid;
+    if (!requester || !requester->is_user)
+        return ProcessTerminationRequestResult::InvalidProcess;
+
+    uint64_t flags = relationship_lock();
+    ProcessState requester_state = requester->state();
+    if (requester_state != ProcessState::Ready && requester_state != ProcessState::Running) {
+        relationship_unlock(flags);
+        return ProcessTerminationRequestResult::InvalidState;
+    }
+    Process* target = requester->relationship_first_child;
+    while (target && target->pid != target_pid) target = target->relationship_next_sibling;
+    if (!target) {
+        relationship_unlock(flags);
+        return ProcessTerminationRequestResult::NoSuchProcess;
+    }
+    if (!target->retain()) {
+        relationship_unlock(flags);
+        return ProcessTerminationRequestResult::InvalidProcess;
+    }
+    relationship_unlock(flags);
+
+    ProcessTerminationRequestResult result = scheduler_terminate_process(target, status);
+    if (target->release() != ProcessResult::Success)
+        panic("Controlled termination target reference could not be released");
+    return result;
 }
 
 void process_finish_relationships(Process* process) {

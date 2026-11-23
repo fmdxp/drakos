@@ -210,6 +210,9 @@ qemu-test-address-space: $(ISO)
 	grep -q 'process wait/reap SMP runtime: PASS' "$$test_root/serial.log"; \
 	grep -q 'process wait-any concurrent child exits and reap: PASS' "$$test_root/serial.log"; \
 	grep -q 'parent exit orphaned live child safely: PASS' "$$test_root/serial.log"; \
+	grep -q 'controlled termination stopped all child threads: PASS' "$$test_root/serial.log"; \
+	grep -q 'controlled termination waitpid status and reap: PASS' "$$test_root/serial.log"; \
+	grep -q 'controlled process termination SMP runtime: PASS' "$$test_root/serial.log"; \
 	test "$$(grep -c 'user launch rollback stage: PASS' "$$test_root/serial.log")" -eq 6; \
 	grep -q 'address-space test: PASS' "$$test_root/serial.log"; \
 	grep -q 'SMP scheduler CPU initialization: PASS' "$$test_root/serial.log"; \
