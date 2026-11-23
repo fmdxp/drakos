@@ -2,9 +2,9 @@
 
 ## Scope
 
-This documents user-process creation, execution, and process-wide exit. It does
-not provide wait/reap, parent-child relationships, external process termination,
-or userspace spawning.
+This documents user-process creation, execution, process-wide exit,
+parent-child relationships, and wait/reap. External process termination,
+userspace spawning, and an initial userspace process are not provided.
 
 ## Lifecycle
 
@@ -28,9 +28,10 @@ Created -> Initializing -> Ready -> Running -> Terminating -> Exited
 - **Exited:** owned address space, handles, and VM-region metadata have been
   cleaned. The process object can remain alive while references remain.
 
-There is no Reaped state or process registry yet. Exited is terminal; wait and
-reap semantics belong to a later milestone. Kernel worker processes use the
-kernel address space as a borrowed root and start Ready.
+There is no Reaped state or global process registry. Exited is terminal; a
+successful wait removes the parent-child relationship while the Process object
+may remain alive for other outstanding references. Kernel worker processes use
+the kernel address space as a borrowed root and start Ready.
 
 ## Process exit
 
@@ -54,8 +55,59 @@ can be running in the address space does the scheduler destroy process-owned
 address-space resources, close handles, clear VM-region metadata, transition
 Terminating to Exited, and release its cleanup reference. Thread objects and
 the Process remain protected by their existing references until deferred
-reclamation finishes. No parent notification or status collection syscall is
-provided yet.
+reclamation finishes. Publishing Exited notifies an attached parent and wakes
+its waiters.
+
+## Parent-child ownership and wait/reap
+
+`process_attach_child(parent, child)` establishes a relationship only between
+distinct user processes in valid lifecycle states. A parent owns each child
+link, and each link holds one child reference so an exited child remains
+available for status collection. The child's back-reference to its parent is
+weak; this avoids a reference cycle. Relationship mutation and lookup are
+serialized by the process relationship lock. PIDs increase monotonically and
+the allocator stops rather than wrapping, so a relation cannot accidentally
+refer to a later process after PID reuse.
+
+`user_process_create_from_elf` accepts an optional parent Process. The caller
+still receives its creator reference. Kernel-created processes may omit a
+parent. This milestone does not add a spawn syscall.
+
+The userspace syscall ABI assigns number 61 to `waitpid(pid, status*)`:
+
+- A positive PID waits for that direct child.
+- `-1` waits for any direct child.
+- A null status pointer is allowed; otherwise it must reference writable
+  userspace memory.
+- Success returns the reaped child PID and, when requested, stores its signed
+  exit status in an `int32_t`.
+- Errors return negative `EINVAL` for PID 0 or values below -1, `ECHILD` when
+  there is no matching unreaped child, `EFAULT` for an invalid status pointer,
+  `EPERM` outside a user process, and `EAGAIN` if the current thread cannot be
+  blocked by the scheduler.
+
+The kernel checks child state and prepares the current thread to block while
+holding the relationship lock. A scheduler handoff state latches a wake that
+arrives before switch-out completes, closing the condition-check/sleep race
+without polling. Child exit and successful reaping wake all threads waiting for
+that parent; each waiter rechecks the child list under lock. Only one waiter
+can unlink and collect a child. Reaping takes a temporary child reference
+before dropping the parent's link reference, then releases it after copying
+out PID and status. The status pointer is checked before waiting and checked
+again while holding the process mapping-operation lock before copyout; mmap and
+munmap use that same lock so a sibling thread cannot remove the output mapping
+during the final copy.
+
+If a parent reaches Exited before its children, cleanup clears their weak
+parent back-references and releases the parent's child-link references. The
+children become orphans and continue running; no userspace init/reaper adopts
+them. They do not leak solely because of an abandoned relationship, although
+other owners (including a process-creation caller reference) must still release
+their references. A future init process may add adoption policy.
+
+The relationship lock serializes concurrent exits, waiters, and reaps on SMP
+and is never held while a parent blocks. This does not add wait options,
+signaling, global PID lookup, or process spawning.
 
 ## Creation transaction
 
@@ -84,7 +136,9 @@ Process for its entire object lifetime. Since the scheduler owns an enrolled
 Thread until it has safely left every CPU's current/pending context, this
 Thread reference keeps the Process alive across scheduling and deferred thread
 reclamation. The scheduler also takes an explicit reference when queuing
-terminal process cleanup.
+terminal process cleanup. A parent relationship adds one child reference; the
+weak parent pointer adds none. Successful wait or parent orphan cleanup
+releases that relationship reference.
 
 The scheduler thread count is protected by the scheduler lock. A process is
 not destroyed while that count is nonzero. Each enrolled user thread also
@@ -119,15 +173,14 @@ remain outside the run-queue lock.
 
 ## Testing and limitations
 
-Host tests use the actual Process factory and VMM implementation to verify
-empty-process creation/destruction, lifecycle transitions, reference behavior,
-address-space ownership, and rollback after injected address-space registry
-allocation failure. The existing four-CPU QEMU tests continue to exercise
-synthetic user threads, address-space isolation, deferred cleanup, and SMP
-scheduling; they do not load ELF processes.
+Host tests use the Process factory and VMM implementation to verify relationship
+registration, invalid/duplicate links, exit-before-wait collection, status
+preservation, one-time reaping, and orphan detachment. Four-CPU QEMU tests
+exercise the userspace wait syscall, invalid status pointers, concurrent parent
+waiters, blocked wakeup, multiple child exits, single reaping, status copyout,
+and a parent exiting while a live orphan continues to run.
 
-The Process record retains exit status but has no waitable parent relationship,
-PID lookup/registry, or reaping API. Direct `scheduler_terminate_thread` still
-terminates one thread only; the userspace `exit` syscall is process-wide.
-Dynamic ELF loading, command-line/environment construction, userspace spawn,
-and SSM integration remain later milestones.
+Direct `scheduler_terminate_thread` still terminates one thread only; the
+userspace `exit` syscall is process-wide. Dynamic ELF loading and
+command-line/environment construction exist, while userspace spawn and SSM
+integration remain later milestones.

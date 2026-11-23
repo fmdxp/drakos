@@ -205,6 +205,11 @@ qemu-test-address-space: $(ISO)
 	grep -q 'unrelated process continued after exit: PASS' "$$test_root/serial.log"; \
 	grep -q 'implicit process exit status defaults to zero: PASS' "$$test_root/serial.log"; \
 	grep -q 'process exit semantics: PASS' "$$test_root/serial.log"; \
+	grep -q 'process wait blocked parent threads: PASS' "$$test_root/serial.log"; \
+	grep -q 'process wait concurrent single reap and status: PASS' "$$test_root/serial.log"; \
+	grep -q 'process wait/reap SMP runtime: PASS' "$$test_root/serial.log"; \
+	grep -q 'process wait-any concurrent child exits and reap: PASS' "$$test_root/serial.log"; \
+	grep -q 'parent exit orphaned live child safely: PASS' "$$test_root/serial.log"; \
 	test "$$(grep -c 'user launch rollback stage: PASS' "$$test_root/serial.log")" -eq 6; \
 	grep -q 'address-space test: PASS' "$$test_root/serial.log"; \
 	grep -q 'SMP scheduler CPU initialization: PASS' "$$test_root/serial.log"; \

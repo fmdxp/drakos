@@ -20,6 +20,7 @@ enum class UserProcessCreateError : uint8_t {
     ArgumentLimitExceeded,
     ArgumentStorageExceeded,
     CleanupFailed,
+    InvalidParent,
 };
 
 struct UserProcessImage {
@@ -47,7 +48,8 @@ UserProcessCreateResult user_process_create_from_elf(VFS::FileObject& file,
                                                       uint64_t file_offset,
                                                       uint64_t file_size,
                                                       UserProcessImage* output,
-                                                      const UserProcessArguments* arguments = nullptr);
+                                                      const UserProcessArguments* arguments = nullptr,
+                                                      Process* parent = nullptr);
 
 // Test seam used by QEMU runtime tests to exercise thread-allocation rollback.
 void user_process_test_fail_next_thread_allocation();

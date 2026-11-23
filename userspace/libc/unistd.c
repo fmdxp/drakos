@@ -25,6 +25,10 @@ int getpid(void) {
     return (int)syscall0(SYS_getpid);
 }
 
+int64_t waitpid(int64_t pid, int32_t *status) {
+    return (int64_t)syscall2(SYS_waitpid, (uint64_t)pid, (uint64_t)status);
+}
+
 void sched_yield(void) {
     syscall0(SYS_sched_yield);
 }

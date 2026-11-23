@@ -2,6 +2,9 @@
 
 bool run_address_space_runtime_test();
 bool run_process_exit_runtime_test();
+bool run_process_wait_runtime_test();
+bool run_process_wait_multi_child_runtime_test();
+bool run_process_orphan_runtime_test();
 bool run_smp_user_scheduler_runtime_test();
 bool run_smp_kernel_scheduler_runtime_test();
 bool run_smp_independent_user_runtime_test();

@@ -66,7 +66,8 @@ UserProcessCreateResult user_process_create_from_elf(VFS::FileObject& file,
                                                       uint64_t file_offset,
                                                       uint64_t file_size,
                                                       UserProcessImage* output,
-                                                      const UserProcessArguments* arguments) {
+                                                      const UserProcessArguments* arguments,
+                                                      Process* parent) {
     if (output) *output = {};
     if (!output) return create_result(UserProcessCreateError::InvalidArgument);
     const UserProcessArguments empty_arguments{};
@@ -129,12 +130,23 @@ UserProcessCreateResult user_process_create_from_elf(VFS::FileObject& file,
         return create_result(UserProcessCreateError::InvalidThreadContext);
     }
 
+    if (parent) {
+        ProcessRelationshipResult relationship = process_attach_child(parent, process);
+        if (relationship != ProcessRelationshipResult::Success) {
+            cleanup_unpublished(process, thread);
+            return create_result(UserProcessCreateError::InvalidParent);
+        }
+    }
+
     uintptr_t entry_point = image.entry_point;
     uintptr_t initial_stack_pointer = thread->context->rsp;
     uint64_t mapped_memory_size = image.mapped_memory_size;
     uint32_t load_segment_count = image.load_segment_count;
     SchedulerPublishResult published = scheduler_add_thread(thread);
     if (published != SchedulerPublishResult::Success) {
+        if (parent && process->parent_pid() == parent->pid &&
+            !process_detach_child(parent, process))
+            panic("Failed to roll back unpublished child relationship");
         cleanup_unpublished(process, thread);
         UserProcessCreateResult result = create_result(
             UserProcessCreateError::SchedulerPublicationFailed);

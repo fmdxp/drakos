@@ -8,12 +8,49 @@
 namespace {
 constexpr uint32_t kDestroyingReferenceCount = UINT32_MAX;
 constexpr uintptr_t kInitialUserStackTop = 0x00007FFFF0000000ULL;
+static volatile bool s_relationship_lock = false;
+
+uint64_t relationship_lock() {
+#ifdef DRAKOS_HOST_TEST
+    while (__atomic_test_and_set(&s_relationship_lock, __ATOMIC_ACQUIRE))
+        __asm__ volatile("pause");
+    return 0;
+#else
+    uint64_t flags;
+    asm volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    while (__atomic_test_and_set(&s_relationship_lock, __ATOMIC_ACQUIRE))
+        asm volatile("pause");
+    return flags;
+#endif
+}
+
+void relationship_unlock(uint64_t flags) {
+    __atomic_clear(&s_relationship_lock, __ATOMIC_RELEASE);
+#ifndef DRAKOS_HOST_TEST
+    if (flags & 0x200) asm volatile("sti" ::: "memory");
+#else
+    (void)flags;
+#endif
+}
 
 uint64_t allocate_process_id() {
     static uint64_t next_pid = 1;
-    return __atomic_fetch_add(&next_pid, 1, __ATOMIC_RELAXED);
+    uint64_t current = __atomic_load_n(&next_pid, __ATOMIC_RELAXED);
+    for (;;) {
+        if (!current || current == UINT64_MAX) return 0;
+        if (__atomic_compare_exchange_n(&next_pid, &current, current + 1, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return current;
+    }
 }
 }
+
+#ifdef DRAKOS_HOST_TEST
+bool scheduler_prepare_wait_current_thread(Process*) { return false; }
+void scheduler_clear_current_thread_wait() {}
+void scheduler_wake_process_waiters(Process*) {}
+void scheduler_yield() {}
+#endif
 
 Process::Process()
     : pid(allocate_process_id()), page_table_phys(vmm_get_kernel_pml4()), is_user(false),
@@ -22,7 +59,10 @@ Process::Process()
       handles(), vm_regions(), next_mmap_address(0x100000000ULL),
       owns_address_space(false), references(1),
       lifecycle_state(static_cast<uint8_t>(ProcessState::Ready)), stored_exit_status(0),
-      explicit_exit_status(false) {
+      explicit_exit_status(false), relationship_parent(nullptr),
+      relationship_first_child(nullptr), relationship_next_sibling(nullptr),
+      user_mapping_lock(false) {
+    if (!pid) panic("Process ID space exhausted");
 }
 
 Process::Process(UserProcessTag)
@@ -32,11 +72,14 @@ Process::Process(UserProcessTag)
       handles(), vm_regions(), next_mmap_address(0x100000000ULL),
       owns_address_space(false), references(1),
       lifecycle_state(static_cast<uint8_t>(ProcessState::Created)), stored_exit_status(0),
-      explicit_exit_status(false) {
+      explicit_exit_status(false), relationship_parent(nullptr),
+      relationship_first_child(nullptr), relationship_next_sibling(nullptr),
+      user_mapping_lock(false) {
 }
 
 Process::~Process() {
-    if (owns_address_space || state() != ProcessState::Exited)
+    if (owns_address_space || state() != ProcessState::Exited || relationship_parent ||
+        relationship_first_child || relationship_next_sibling)
         panic("Process released before reaching a resource-free terminal state");
 }
 
@@ -52,6 +95,12 @@ ProcessResult Process::create_user(Process** output) {
     if (storage) process = new (storage) Process(UserProcessTag{});
 #endif
     if (!process) return ProcessResult::OutOfMemory;
+    if (!process->pid) {
+        __atomic_store_n(&process->lifecycle_state,
+                         static_cast<uint8_t>(ProcessState::Exited), __ATOMIC_RELEASE);
+        (void)process->release();
+        return ProcessResult::OutOfMemory;
+    }
 
     if (!process->transition_to(ProcessState::Initializing)) {
         __atomic_store_n(&process->lifecycle_state,
@@ -148,6 +197,183 @@ bool Process::has_explicit_exit_status() const {
     return __atomic_load_n(&explicit_exit_status, __ATOMIC_ACQUIRE);
 }
 
+uint64_t Process::parent_pid() const {
+    uint64_t flags = relationship_lock();
+    uint64_t result = relationship_parent ? relationship_parent->pid : 0;
+    relationship_unlock(flags);
+    return result;
+}
+
+bool Process::has_child_pid(uint64_t child_pid) const {
+    uint64_t flags = relationship_lock();
+    bool found = false;
+    for (Process* child = relationship_first_child; child;
+         child = child->relationship_next_sibling) {
+        if (child->pid == child_pid) { found = true; break; }
+    }
+    relationship_unlock(flags);
+    return found;
+}
+
+uint32_t Process::child_count() const {
+    uint64_t flags = relationship_lock();
+    uint32_t count = 0;
+    for (Process* child = relationship_first_child; child;
+         child = child->relationship_next_sibling) ++count;
+    relationship_unlock(flags);
+    return count;
+}
+
+void Process::lock_user_mappings() {
+    while (__atomic_test_and_set(&user_mapping_lock, __ATOMIC_ACQUIRE))
+        asm volatile("pause");
+}
+
+void Process::unlock_user_mappings() {
+    __atomic_clear(&user_mapping_lock, __ATOMIC_RELEASE);
+}
+
+ProcessRelationshipResult process_attach_child(Process* parent, Process* child) {
+    if (!parent || !child || parent == child || !parent->is_user || !child->is_user)
+        return ProcessRelationshipResult::InvalidProcess;
+    uint64_t flags = relationship_lock();
+    ProcessState parent_state = parent->state();
+    ProcessState child_state = child->state();
+    if ((parent_state != ProcessState::Ready && parent_state != ProcessState::Running) ||
+        child_state != ProcessState::Ready) {
+        relationship_unlock(flags);
+        return ProcessRelationshipResult::InvalidProcess;
+    }
+    for (Process* cursor = parent->relationship_first_child; cursor;
+         cursor = cursor->relationship_next_sibling) {
+        if (cursor == child || cursor->pid == child->pid) {
+            relationship_unlock(flags);
+            return ProcessRelationshipResult::DuplicateChild;
+        }
+    }
+    if (child->relationship_parent) {
+        relationship_unlock(flags);
+        return ProcessRelationshipResult::AlreadyParented;
+    }
+    if (!child->retain()) {
+        relationship_unlock(flags);
+        return ProcessRelationshipResult::ReferenceOverflow;
+    }
+    child->relationship_parent = parent; // weak back-reference; parent owns the link reference
+    child->relationship_next_sibling = parent->relationship_first_child;
+    parent->relationship_first_child = child;
+    relationship_unlock(flags);
+    return ProcessRelationshipResult::Success;
+}
+
+bool process_detach_child(Process* parent, Process* child) {
+    if (!parent || !child) return false;
+    uint64_t flags = relationship_lock();
+    if (child->relationship_parent != parent) {
+        relationship_unlock(flags);
+        return false;
+    }
+    Process** cursor = &parent->relationship_first_child;
+    while (*cursor && *cursor != child) cursor = &(*cursor)->relationship_next_sibling;
+    if (*cursor != child) {
+        relationship_unlock(flags);
+        return false;
+    }
+    *cursor = child->relationship_next_sibling;
+    child->relationship_parent = nullptr;
+    child->relationship_next_sibling = nullptr;
+    relationship_unlock(flags);
+    if (child->release() != ProcessResult::Success)
+        panic("Detached child relationship reference could not be released");
+    return true;
+}
+
+ProcessWaitResult process_wait_child(Process* parent, int64_t requested_pid,
+                                     uint64_t* child_pid, int32_t* exit_status) {
+    if (!parent || !parent->is_user || !child_pid || requested_pid == 0 || requested_pid < -1)
+        return requested_pid == 0 || requested_pid < -1
+            ? ProcessWaitResult::InvalidPid : ProcessWaitResult::InvalidParent;
+    for (;;) {
+        uint64_t flags = relationship_lock();
+        Process* match = nullptr;
+        bool has_eligible_child = false;
+        for (Process* child = parent->relationship_first_child; child;
+             child = child->relationship_next_sibling) {
+            if (requested_pid != -1 && child->pid != static_cast<uint64_t>(requested_pid))
+                continue;
+            has_eligible_child = true;
+            if (child->state() == ProcessState::Exited) { match = child; break; }
+        }
+        if (match) {
+            if (!match->retain()) {
+                relationship_unlock(flags);
+                return ProcessWaitResult::InvalidParent;
+            }
+            uint64_t pid = match->pid;
+            int32_t status = match->exit_status();
+            Process** cursor = &parent->relationship_first_child;
+            while (*cursor && *cursor != match)
+                cursor = &(*cursor)->relationship_next_sibling;
+            if (*cursor != match) {
+                relationship_unlock(flags);
+                (void)match->release();
+                return ProcessWaitResult::NoChild;
+            }
+            *cursor = match->relationship_next_sibling;
+            match->relationship_parent = nullptr;
+            match->relationship_next_sibling = nullptr;
+            relationship_unlock(flags);
+            scheduler_wake_process_waiters(parent);
+            if (match->release() != ProcessResult::Success ||
+                match->release() != ProcessResult::Success)
+                panic("Reaped child relationship references could not be released");
+            *child_pid = pid;
+            if (exit_status) *exit_status = status;
+            return ProcessWaitResult::Success;
+        }
+        if (!has_eligible_child) {
+            relationship_unlock(flags);
+            return ProcessWaitResult::NoChild;
+        }
+        if (!scheduler_prepare_wait_current_thread(parent)) {
+            relationship_unlock(flags);
+            return ProcessWaitResult::SchedulerUnavailable;
+        }
+        relationship_unlock(flags);
+        scheduler_yield();
+        scheduler_clear_current_thread_wait();
+    }
+}
+
+void process_finish_relationships(Process* process) {
+    if (!process) return;
+    Process* parent_to_wake = nullptr;
+    Process* orphaned = nullptr;
+    uint64_t flags = relationship_lock();
+    if (process->relationship_parent) {
+        parent_to_wake = process->relationship_parent;
+        if (!parent_to_wake->retain()) parent_to_wake = nullptr;
+    }
+    orphaned = process->relationship_first_child;
+    process->relationship_first_child = nullptr;
+    for (Process* child = orphaned; child; child = child->relationship_next_sibling)
+        child->relationship_parent = nullptr;
+    relationship_unlock(flags);
+
+    if (parent_to_wake) {
+        scheduler_wake_process_waiters(parent_to_wake);
+        if (parent_to_wake->release() != ProcessResult::Success)
+            panic("Parent notification reference could not be released");
+    }
+    while (orphaned) {
+        Process* child = orphaned;
+        orphaned = child->relationship_next_sibling;
+        child->relationship_next_sibling = nullptr;
+        if (child->release() != ProcessResult::Success)
+            panic("Orphaned child relationship reference could not be released");
+    }
+}
+
 ProcessResult Process::destroy_resources() {
     if (scheduler_threads != 0) return ProcessResult::InUse;
     if (owns_address_space) {
@@ -174,6 +400,7 @@ ProcessResult Process::finalize_termination() {
                                      static_cast<uint8_t>(ProcessState::Exited), false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return ProcessResult::InvalidState;
+    process_finish_relationships(this);
     return ProcessResult::Success;
 }
 

@@ -4,6 +4,13 @@
 
 #include <cstdio>
 
+struct ProcessLifecycleTestAccess {
+    static void set_exit_status(Process* process, int32_t status) {
+        __atomic_store_n(&process->stored_exit_status, status, __ATOMIC_RELEASE);
+        __atomic_store_n(&process->explicit_exit_status, true, __ATOMIC_RELEASE);
+    }
+};
+
 static size_t count_available_pages() {
     uintptr_t pages[4096];
     size_t count = 0;
@@ -60,6 +67,62 @@ bool run_process_lifecycle_test() {
         ok &= terminal->release() == ProcessResult::Success;
         ok &= terminal->state() == ProcessState::Exited;
         ok &= terminal->release() == ProcessResult::Success;
+    }
+
+    Process* parent = nullptr;
+    Process* child = nullptr;
+    Process* other_parent = nullptr;
+    ok &= Process::create_user(&parent) == ProcessResult::Success && parent;
+    ok &= Process::create_user(&child) == ProcessResult::Success && child;
+    ok &= Process::create_user(&other_parent) == ProcessResult::Success && other_parent;
+    if (parent && child && other_parent) {
+        ok &= process_attach_child(parent, parent) == ProcessRelationshipResult::InvalidProcess;
+        ok &= process_attach_child(parent, child) == ProcessRelationshipResult::Success;
+        ok &= child->parent_pid() == parent->pid && parent->has_child_pid(child->pid) &&
+            parent->child_count() == 1 && child->reference_count() == 2;
+        ok &= process_attach_child(parent, child) == ProcessRelationshipResult::DuplicateChild;
+        ok &= process_attach_child(other_parent, child) == ProcessRelationshipResult::AlreadyParented;
+
+        uint64_t child_pid = 0;
+        int32_t status = -1;
+        ok &= process_wait_child(parent, static_cast<int64_t>(child->pid),
+            &child_pid, &status) == ProcessWaitResult::SchedulerUnavailable;
+
+        ok &= child->transition_to(ProcessState::Running);
+        ok &= child->transition_to(ProcessState::Terminating);
+        ProcessLifecycleTestAccess::set_exit_status(child, 23);
+        ok &= child->finalize_termination() == ProcessResult::Success;
+        ok &= child->parent_pid() == parent->pid && parent->has_child_pid(child->pid);
+        ok &= process_wait_child(parent, static_cast<int64_t>(child->pid),
+            &child_pid, &status) == ProcessWaitResult::Success;
+        ok &= child_pid == child->pid && status == 23 && child->parent_pid() == 0 &&
+            !parent->has_child_pid(child->pid) && parent->child_count() == 0 &&
+            child->reference_count() == 1;
+        ok &= process_wait_child(parent, static_cast<int64_t>(child->pid),
+            &child_pid, &status) == ProcessWaitResult::NoChild;
+        ok &= process_wait_child(parent, 0, &child_pid, &status) == ProcessWaitResult::InvalidPid;
+        ok &= process_wait_child(parent, -2, &child_pid, &status) == ProcessWaitResult::InvalidPid;
+        ok &= process_wait_child(parent, -1, &child_pid, &status) == ProcessWaitResult::NoChild;
+        ok &= child->release() == ProcessResult::Success;
+
+        Process* orphan = nullptr;
+        ok &= Process::create_user(&orphan) == ProcessResult::Success && orphan;
+        if (orphan) {
+            ok &= process_attach_child(parent, orphan) == ProcessRelationshipResult::Success;
+            ok &= parent->transition_to(ProcessState::Running);
+            ok &= parent->transition_to(ProcessState::Terminating);
+            ok &= parent->finalize_termination() == ProcessResult::Success;
+            ok &= orphan->parent_pid() == 0 && parent->child_count() == 0 &&
+                orphan->reference_count() == 1;
+            ok &= parent->release() == ProcessResult::Success;
+            ok &= orphan->release() == ProcessResult::Success;
+        }
+        ok &= other_parent->release() == ProcessResult::Success;
+    } else {
+        if (parent) (void)parent->release();
+        if (child) (void)child->release();
+        if (other_parent) (void)other_parent->release();
+        ok = false;
     }
 
     size_t pages_before_failure = count_available_pages();

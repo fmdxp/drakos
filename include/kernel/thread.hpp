@@ -65,6 +65,22 @@ enum class ProcessExitRequestResult : uint8_t {
     InvalidProcess,
 };
 
+enum class ProcessRelationshipResult : uint8_t {
+    Success,
+    InvalidProcess,
+    AlreadyParented,
+    DuplicateChild,
+    ReferenceOverflow,
+};
+
+enum class ProcessWaitResult : uint8_t {
+    Success,
+    NoChild,
+    InvalidPid,
+    InvalidParent,
+    SchedulerUnavailable,
+};
+
 class Process {
 public:
     Process();
@@ -78,9 +94,14 @@ public:
     uint32_t reference_count() const;
     int32_t exit_status() const;
     bool has_explicit_exit_status() const;
+    uint64_t parent_pid() const;
+    bool has_child_pid(uint64_t child_pid) const;
+    uint32_t child_count() const;
+    void lock_user_mappings();
+    void unlock_user_mappings();
 
     // Process ID
-    uint64_t pid;
+    const uint64_t pid;
     
     // Physical page table (PML4 or PML5) assigned to this process
     uintptr_t page_table_phys;
@@ -107,11 +128,20 @@ private:
     volatile uint8_t lifecycle_state;
     volatile int32_t stored_exit_status;
     volatile bool explicit_exit_status;
+    Process* relationship_parent;
+    Process* relationship_first_child;
+    Process* relationship_next_sibling;
+    volatile bool user_mapping_lock;
 
     ProcessResult destroy_resources();
     static bool valid_transition(ProcessState from, ProcessState to);
     friend struct ProcessLifecycleTestAccess;
     friend ProcessExitRequestResult scheduler_exit_current_process(int32_t status);
+    friend ProcessRelationshipResult process_attach_child(Process* parent, Process* child);
+    friend bool process_detach_child(Process* parent, Process* child);
+    friend ProcessWaitResult process_wait_child(Process* parent, int64_t requested_pid,
+                                                uint64_t* child_pid, int32_t* exit_status);
+    friend void process_finish_relationships(Process* process);
 };
 
 
@@ -119,6 +149,8 @@ enum ThreadState {
     THREAD_RUNNING,     // Thread is running
     THREAD_READY,       // Thread is ready to be run
     THREAD_SWITCHING,   // Saved context is not yet safe to run on another CPU
+    THREAD_BLOCKING,    // Block requested; wakeups are latched until switch-out completes
+    THREAD_WAIT_SWITCH, // Context switch is completing for a blocked thread
     THREAD_BLOCKED,     // Thread is suspended, waiting for an external event
     THREAD_SLEEPING,    // Thread is suspended, waiting for a specific time (es: sleep(1000);)
     THREAD_DEAD,        // Thread is killed or ended its execution, and it's waiting to be freed up
@@ -180,6 +212,8 @@ public:
     bool address_space_retained;
     bool scheduler_enrolled;
     bool process_final_thread;
+    bool wait_wakeup_pending;
+    Process* waiting_on_process;
     uint32_t last_cpu;
     uint32_t cpu_migrations;
     
@@ -199,6 +233,9 @@ void thread_test_fail_next_initialization();
 extern "C" Context* scheduler_switch(Context* current_context);
 extern "C" void scheduler_finish_switch();
 void scheduler_block_current_thread();
+bool scheduler_prepare_wait_current_thread(Process* wait_owner);
+void scheduler_clear_current_thread_wait();
+void scheduler_wake_process_waiters(Process* wait_owner);
 void scheduler_wake_thread(Thread* t);
 void scheduler_terminate_thread(Thread* t);
 ProcessExitRequestResult scheduler_exit_current_process(int32_t status);
@@ -206,5 +243,11 @@ void scheduler_yield();
 Thread* scheduler_get_current_thread();
 uint32_t scheduler_count_running_process_cpus(const Process* process);
 uint32_t scheduler_count_process_threads(const Process* process);
+uint32_t scheduler_count_process_waiters(const Process* process);
 uint32_t scheduler_enabled_processor_count();
 uint32_t scheduler_thread_migration_count(const Thread* thread);
+
+ProcessRelationshipResult process_attach_child(Process* parent, Process* child);
+bool process_detach_child(Process* parent, Process* child);
+ProcessWaitResult process_wait_child(Process* parent, int64_t requested_pid,
+                                    uint64_t* child_pid, int32_t* exit_status);

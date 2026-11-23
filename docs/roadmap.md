@@ -26,9 +26,14 @@ It does not imply that listed future capabilities already work.
   use the address space. Four-CPU QEMU tests cover concurrent exit, status
   defaults, and unrelated-process progress. See
   [process-lifecycle.md](process-lifecycle.md).
-- **Milestones 6–9 not started:** wait/reap semantics,
-  parent-child management, initial userspace
-  boot, SSM runtime integration, and later launch features remain unimplemented.
+- **Milestone 6 complete:** parent-owned child links retain child objects;
+  `waitpid` supports a selected child or any child, blocks without polling,
+  collects status once, and safely orphans children when a parent exits. Host
+  lifecycle tests and four-CPU QEMU wait/reap races pass. See
+  [process-lifecycle.md](process-lifecycle.md).
+- **Milestones 7–9 not started:** userspace process spawning, initial
+  userspace boot, SSM runtime integration, and later launch features remain
+  unimplemented.
 
 ## System services
 
@@ -39,12 +44,10 @@ in order:
 
 1. Start a first userspace process during boot and provide a safe userspace
    process creation API with arguments and environment.
-2. Add process references, wait/reap, retained exit status, and child exit
-   notification so userspace can supervise child processes.
-3. Add controlled termination and shutdown timeout behavior.
-4. Define a boot-available service configuration source.
-5. Add userspace IPC and service discovery/status messages.
-6. Integrate the SSM executable and verify multiple independent services,
+2. Add controlled process termination and shutdown timeout behavior.
+3. Define a boot-available service configuration source.
+4. Add userspace IPC and service discovery/status messages.
+5. Integrate the SSM executable and verify multiple independent services,
    dependency startup/failure propagation, restart policy, controlled shutdown,
    and cleanup in QEMU.
 

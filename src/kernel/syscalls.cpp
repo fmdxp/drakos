@@ -67,6 +67,20 @@ static Process* current_user_process() {
     return current->parent_process;
 }
 
+class UserMappingGuard {
+public:
+    explicit UserMappingGuard(Process* process) : process_(process) {
+        if (process_) process_->lock_user_mappings();
+    }
+    ~UserMappingGuard() {
+        if (process_) process_->unlock_user_mappings();
+    }
+    UserMappingGuard(const UserMappingGuard&) = delete;
+    UserMappingGuard& operator=(const UserMappingGuard&) = delete;
+private:
+    Process* process_;
+};
+
 static VFS::FileObject* acquire_user_file(uint64_t handle, uint32_t rights) {
     if (handle > INT32_MAX) return nullptr;
     Process* process = current_user_process();
@@ -229,6 +243,7 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
             VmRegion region{permissions, VmRegionType::Anonymous, VmRegionSharing::Private, 0,
                             static_cast<uintptr_t>(addr), static_cast<uintptr_t>(addr + rounded_length),
                             0, nullptr};
+            UserMappingGuard mapping_guard(process);
             VmRegionResult added = process->vm_regions.insert(region);
             ret = added == VmRegionResult::Success ? static_cast<int64_t>(addr) :
                   (added == VmRegionResult::CapacityExceeded ? -ENOMEM : -EINVAL);
@@ -255,6 +270,7 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
                 ret = -EPERM;
                 break;
             }
+            UserMappingGuard mapping_guard(process);
             uintptr_t end = addr + pages * PAGE_SIZE;
             if (!process->vm_regions.covers(addr, end) ||
                 process->vm_regions.remove(addr, end) != VmRegionResult::Success) {
@@ -362,6 +378,45 @@ extern "C" void syscall_handler(SyscallFrame* frame) {
                 panic("Process exit syscall returned to an exiting thread");
             }
             ret = -EPERM;
+            break;
+        }
+
+        case 61: { // waitpid (pid, status*) -- pid -1 waits for any child
+            int64_t requested_pid = static_cast<int64_t>(frame->rdi);
+            if (frame->rsi && !user_range_access(frame->rsi, sizeof(int32_t), true)) {
+                ret = -EFAULT;
+                break;
+            }
+            Process* parent = current_user_process();
+            if (!parent) { ret = -EPERM; break; }
+            uint64_t child_pid = 0;
+            int32_t status = 0;
+            ProcessWaitResult result = process_wait_child(parent, requested_pid,
+                &child_pid, frame->rsi ? &status : nullptr);
+            switch (result) {
+                case ProcessWaitResult::Success:
+                    if (frame->rsi) {
+                        UserMappingGuard mapping_guard(parent);
+                        if (!user_range_access(frame->rsi, sizeof(int32_t), true)) ret = -EFAULT;
+                        else {
+                            *reinterpret_cast<int32_t*>(frame->rsi) = status;
+                            ret = static_cast<int64_t>(child_pid);
+                        }
+                    } else ret = static_cast<int64_t>(child_pid);
+                    break;
+                case ProcessWaitResult::NoChild:
+                    ret = -ECHILD;
+                    break;
+                case ProcessWaitResult::InvalidPid:
+                    ret = -EINVAL;
+                    break;
+                case ProcessWaitResult::InvalidParent:
+                    ret = -EPERM;
+                    break;
+                case ProcessWaitResult::SchedulerUnavailable:
+                    ret = -EAGAIN;
+                    break;
+            }
             break;
         }
 

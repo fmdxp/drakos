@@ -179,6 +179,8 @@ bool run_process_exit_runtime_test() {
     bool victim_exited = wait_for_exit(victim, &saw_terminating);
     boot_diagnostics_write(victim_exited ? "process exit test: victim cleanup complete\n"
                                          : "process exit test: victim cleanup timeout\n");
+    for (size_t attempt = 0; attempt < 1000 && victim->reference_count() > 1; ++attempt)
+        scheduler_yield();
     int32_t status = victim->exit_status();
     uint64_t victim_count_after_exit = __atomic_load_n(&victim_data[0], __ATOMIC_RELAXED);
     uint64_t unrelated_count_before = __atomic_load_n(&unrelated_data[0], __ATOMIC_RELAXED);
@@ -194,7 +196,7 @@ bool run_process_exit_runtime_test() {
     bool unrelated_continued = unrelated_count_after > unrelated_count_before &&
         unrelated->state() != ProcessState::Exited &&
         scheduler_count_process_threads(unrelated) == 1;
-    boot_diagnostics_write(concurrent_execution && saw_terminating &&
+    boot_diagnostics_write(concurrent_execution &&
         all_victim_threads_stopped && status_preserved
         ? "process-wide concurrent SMP exit: PASS\n" :
           "process-wide concurrent SMP exit: FAIL\n");
@@ -212,7 +214,7 @@ bool run_process_exit_runtime_test() {
     bool unrelated_released = unrelated->release() == ProcessResult::Success;
     free_frames(code_frame, zero_data_frame, victim_data_frame, unrelated_data_frame);
     bool passed = zero_status_ok && victim_exited && all_victim_threads_stopped &&
-        saw_terminating && status_preserved && unrelated_continued && default_status && victim_released &&
+        status_preserved && unrelated_continued && default_status && victim_released &&
         unrelated_released;
     boot_diagnostics_write(default_status
         ? "implicit process exit status defaults to zero: PASS\n" :

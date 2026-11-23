@@ -124,6 +124,12 @@ extern "C" [[noreturn]] void kernel_main(void)
     if (command_line_has_test(command_line)) {
         if (!run_process_exit_runtime_test())
             panic("Process exit runtime test failed");
+        if (!run_process_wait_runtime_test())
+            panic("Process wait/reap runtime test failed");
+        if (!run_process_wait_multi_child_runtime_test())
+            panic("Concurrent child wait/reap runtime test failed");
+        if (!run_process_orphan_runtime_test())
+            panic("Live-child orphan runtime test failed");
         if (!run_smp_kernel_scheduler_runtime_test())
             panic("SMP kernel scheduler runtime test failed");
         if (!run_smp_user_scheduler_runtime_test())

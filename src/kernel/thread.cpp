@@ -82,6 +82,8 @@ Thread::Thread(Process* parent, void (*entry_point)(), bool is_user,
     address_space_retained = false;
     scheduler_enrolled = false;
     process_final_thread = false;
+    wait_wakeup_pending = false;
+    waiting_on_process = nullptr;
     last_cpu = UINT32_MAX;
     cpu_migrations = 0;
     state = THREAD_READY; // Ready
@@ -373,6 +375,8 @@ extern "C" Context* scheduler_switch(Context* current_context) {
         arch_save_fpu(old_thread->fpu_state);
         cpu->pending_ready = old_thread;
         if (old_thread->state == THREAD_RUNNING) old_thread->state = THREAD_SWITCHING;
+        else if (old_thread->state == THREAD_BLOCKING)
+            old_thread->state = THREAD_WAIT_SWITCH;
     } else {
         cpu->first_dispatch = false;
     }
@@ -558,6 +562,10 @@ extern "C" void scheduler_finish_switch() {
     cpu->pending_ready = nullptr;
     if (previous && previous->state == THREAD_SWITCHING)
         previous->state = THREAD_READY;
+    else if (previous && previous->state == THREAD_WAIT_SWITCH) {
+        previous->state = previous->wait_wakeup_pending ? THREAD_READY : THREAD_BLOCKED;
+        previous->wait_wakeup_pending = false;
+    }
     scheduler_unlock(flags);
 }
 
@@ -577,7 +585,59 @@ void scheduler_block_current_thread() {
 void scheduler_wake_thread(Thread* t) {
     if (!t) return;
     uint64_t flags = scheduler_lock();
-    if (t->scheduler_enrolled && t->state == THREAD_BLOCKED) t->state = THREAD_READY;
+    if (t->scheduler_enrolled) {
+        if (t->state == THREAD_BLOCKING || t->state == THREAD_WAIT_SWITCH)
+            t->wait_wakeup_pending = true;
+        else if (t->state == THREAD_BLOCKED)
+            t->state = THREAD_READY;
+    }
+    scheduler_unlock(flags);
+}
+
+bool scheduler_prepare_wait_current_thread(Process* wait_owner) {
+    if (!wait_owner) return false;
+    uint64_t flags = scheduler_lock();
+    CpuSchedulerState* cpu = current_cpu_state();
+    Thread* current = cpu ? cpu->current : nullptr;
+    bool prepared = current && current->scheduler_enrolled &&
+        current->state == THREAD_RUNNING && current->parent_process &&
+        current->parent_process->is_user;
+    if (prepared) {
+        current->waiting_on_process = wait_owner;
+        current->wait_wakeup_pending = false;
+        current->state = THREAD_BLOCKING;
+    }
+    scheduler_unlock(flags);
+    return prepared;
+}
+
+void scheduler_clear_current_thread_wait() {
+    uint64_t flags = scheduler_lock();
+    CpuSchedulerState* cpu = current_cpu_state();
+    Thread* current = cpu ? cpu->current : nullptr;
+    if (current) {
+        current->waiting_on_process = nullptr;
+        current->wait_wakeup_pending = false;
+    }
+    scheduler_unlock(flags);
+}
+
+void scheduler_wake_process_waiters(Process* wait_owner) {
+    if (!wait_owner) return;
+    uint64_t flags = scheduler_lock();
+    if (s_run_queue) {
+        Thread* thread = s_run_queue;
+        uint32_t remaining = s_runnable_count;
+        while (remaining-- && thread) {
+            if (thread->scheduler_enrolled && thread->waiting_on_process == wait_owner) {
+                if (thread->state == THREAD_BLOCKING || thread->state == THREAD_WAIT_SWITCH)
+                    thread->wait_wakeup_pending = true;
+                else if (thread->state == THREAD_BLOCKED)
+                    thread->state = THREAD_READY;
+            }
+            thread = thread->next;
+        }
+    }
     scheduler_unlock(flags);
 }
 
@@ -663,6 +723,24 @@ uint32_t scheduler_count_process_threads(const Process* process) {
     if (!process) return 0;
     uint64_t flags = scheduler_lock();
     uint32_t count = process->scheduler_threads;
+    scheduler_unlock(flags);
+    return count;
+}
+
+uint32_t scheduler_count_process_waiters(const Process* process) {
+    if (!process) return 0;
+    uint64_t flags = scheduler_lock();
+    uint32_t count = 0;
+    if (s_run_queue) {
+        Thread* thread = s_run_queue;
+        uint32_t remaining = s_runnable_count;
+        while (remaining-- && thread) {
+            if (thread->scheduler_enrolled && thread->waiting_on_process == process &&
+                (thread->state == THREAD_WAIT_SWITCH || thread->state == THREAD_BLOCKED))
+                ++count;
+            thread = thread->next;
+        }
+    }
     scheduler_unlock(flags);
     return count;
 }
